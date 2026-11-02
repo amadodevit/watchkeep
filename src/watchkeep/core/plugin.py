@@ -69,6 +69,9 @@ class SyncContext:
 
     `warnings` are partial failures worth showing without failing the sync,
     e.g. one feed out of five unreachable. Short, plain English, no secrets.
+
+    `quiet` holds ids of items to show without a notification when they are new,
+    e.g. what was already there when a repo was first watched. Only this sync.
     """
 
     settings: dict[str, Any]
@@ -76,6 +79,7 @@ class SyncContext:
     extra: dict[str, Any] = field(default_factory=dict)
     memory: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    quiet: set[str] = field(default_factory=set)
 
 
 @runtime_checkable

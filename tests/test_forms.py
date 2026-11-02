@@ -583,3 +583,54 @@ def test_panel_manager_opens_from_the_app_with_p_and_updates_the_tabs():
             return [str(t.label) for t in app.query_one(Tabs).query("Tab")]
 
     assert asyncio.run(run()) == ["1 All", "2 Personal", "Notifications", "Archive"]
+
+
+class GhReposPlugin(GhLikePlugin):
+    """Like GhLikePlugin, plus an optional repo picker that only the manual step used to show."""
+
+    settings = GhLikePlugin.settings + (Setting("repos", "Repos", required=False, fetch=True),)
+
+    def options(self, ctx, key):
+        self.asked = (ctx.settings["account"], key)
+        return ["acme/gears", "acme/widgets"]
+
+
+def test_detected_account_gets_picker_fields_in_the_watch_step():
+    plugin = GhReposPlugin(found=[Candidate("home", {"account": "home", "token": "gh:home"})])
+    core = Core({"ghlike": plugin}, Store(":memory:"))
+    core._resolve = lambda name, settings: settings  # no gh CLI in tests
+
+    async def steps(app, pilot):
+        await pick_type(app, pilot, "ghlike")
+        await wait_for(app, pilot, "#accounts")
+        app.screen.query_one("#accounts", SelectionList).select(0)
+        await pilot.click("#next-found")
+        await wait_for(app, pilot, "#setting-repos")
+        app.screen.query_one("#fetch-repos", Button).press()
+        await wait_for(app, pilot, "#options-repos")
+        app.screen.query_one("#options-repos", SelectionList).select("acme/widgets")
+        await pilot.pause()
+        await pilot.click("#add")
+
+    assert run_wizard(core, steps) == ["home"]
+    assert plugin.asked == ("home", "repos")  # fetched with the detected account's settings
+    assert core._all["home"].settings["repos"] == "acme/widgets"
+
+
+def test_manual_path_keeps_picker_fields_on_the_details_step_only():
+    plugin = GhReposPlugin(found=[])
+    core = Core({"ghlike": plugin}, Store(":memory:"))
+
+    async def steps(app, pilot):
+        await pick_type(app, pilot, "ghlike")
+        await wait_for(app, pilot, "#setting-repos")  # nothing detected -> manual step
+        app.screen.query_one("#setting-account", Input).value = "me"
+        app.screen.query_one("#setting-token", Input).value = "env:TOKEN"
+        app.screen.query_one("#setting-repos", Input).value = "acme/*"
+        await pilot.click("#next-manual")
+        await wait_for(app, pilot, "#add")
+        assert not app.screen.query("#setting-repos")
+        await pilot.click("#add")
+
+    assert run_wizard(core, steps) == ["me"]
+    assert core._all["me"].settings["repos"] == "acme/*"

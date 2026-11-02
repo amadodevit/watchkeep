@@ -1,0 +1,114 @@
+[
+ {
+  "number": 50,
+  "title": "Add sprocket cache ",
+  "html_url": "https://github.com/acme/widgets/pull/50",
+  "user": {
+   "login": "dave"
+  },
+  "updated_at": "2026-11-01T10:00:00Z",
+  "draft": false,
+  "requested_reviewers": [],
+  "requested_teams": [],
+  "assignee": null,
+  "assignees": []
+ },
+ {
+  "number": 51,
+  "title": "WIP: rework gears ",
+  "html_url": "https://github.com/acme/widgets/pull/51",
+  "user": {
+   "login": "dave"
+  },
+  "updated_at": "2026-11-01T10:00:00Z",
+  "draft": true,
+  "requested_reviewers": [],
+  "requested_teams": [],
+  "assignee": null,
+  "assignees": []
+ },
+ {
+  "number": 52,
+  "title": "My own change ",
+  "html_url": "https://github.com/acme/widgets/pull/52",
+  "user": {
+   "login": "me"
+  },
+  "updated_at": "2026-11-01T10:00:00Z",
+  "draft": false,
+  "requested_reviewers": [],
+  "requested_teams": [],
+  "assignee": null,
+  "assignees": []
+ },
+ {
+  "number": 53,
+  "title": "Has a reviewer ",
+  "html_url": "https://github.com/acme/widgets/pull/53",
+  "user": {
+   "login": "dave"
+  },
+  "updated_at": "2026-11-01T10:00:00Z",
+  "draft": false,
+  "requested_reviewers": [
+   {
+    "login": "erin"
+   }
+  ],
+  "requested_teams": [],
+  "assignee": null,
+  "assignees": []
+ },
+ {
+  "number": 54,
+  "title": "Team asked ",
+  "html_url": "https://github.com/acme/widgets/pull/54",
+  "user": {
+   "login": "dave"
+  },
+  "updated_at": "2026-11-01T10:00:00Z",
+  "draft": false,
+  "requested_reviewers": [],
+  "requested_teams": [
+   {
+    "slug": "core"
+   }
+  ],
+  "assignee": null,
+  "assignees": []
+ },
+ {
+  "number": 55,
+  "title": "Someone assigned ",
+  "html_url": "https://github.com/acme/widgets/pull/55",
+  "user": {
+   "login": "dave"
+  },
+  "updated_at": "2026-11-01T10:00:00Z",
+  "draft": false,
+  "requested_reviewers": [],
+  "requested_teams": [],
+  "assignee": {
+   "login": "frank"
+  },
+  "assignees": [
+   {
+    "login": "frank"
+   }
+  ]
+ },
+ {
+  "number": 56,
+  "title": "Already reviewed ",
+  "html_url": "https://github.com/acme/widgets/pull/56",
+  "user": {
+   "login": "dave"
+  },
+  "updated_at": "2026-11-01T10:00:00Z",
+  "draft": false,
+  "requested_reviewers": [],
+  "requested_teams": [],
+  "assignee": null,
+  "assignees": []
+ }
+]

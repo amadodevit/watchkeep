@@ -1,12 +1,22 @@
-"""GitHub source: open review requests, plus unread comments and mentions.
+"""GitHub source: open review requests, unread comments and mentions, and PRs nobody was asked to review.
 
 Review requests come from search (a true snapshot: once you review, the PR drops
 out). Comments and mentions come from unread notifications (they drop out when
 marked read on GitHub).
+
+"No reviewer" rows catch PRs a teammate opened in a picked repo and forgot to ask
+anyone to review. Search can't filter on "no reviewer requested", so each repo's
+open PRs are listed and filtered here. A PR counts while it has no requested
+reviewer, no assignee and no review ever submitted (GitHub empties the requested
+list once a reviewer submits, so the review history is what tells "forgotten"
+from "done"). Drafts and the account's own PRs are skipped. The PRs already
+waiting when a repo is first watched show without a popup (ctx.quiet): those are
+often the forgotten ones. Only PRs opened later notify.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import shutil
@@ -21,7 +31,8 @@ REVIEW_QUERY = "is:pr is:open review-requested:@me archived:false"
 NOTIFICATION_ACTIONS = {"comment": "commented", "mention": "mentioned", "team_mention": "mentioned"}
 # notification reason -> the "watch" choice that enables it
 REASON_WATCH = {"comment": "comments", "mention": "mentions", "team_mention": "mentions"}
-WATCH_ALL = ("review_requests", "comments", "mentions")
+WATCH_ALL = ("review_requests", "comments", "mentions")  # sources from before "watch" existed; "unreviewed" is opt-in
+MAX_REPO_PAGES = 10  # the repo picker stops at 1 000 repos
 
 
 class GitHubSource:
@@ -43,7 +54,15 @@ class GitHubSource:
                 Choice("review_requests", "Review requests"),
                 Choice("comments", "Comments"),
                 Choice("mentions", "Mentions"),
+                Choice("unreviewed", "PRs with no reviewer (in the repos below)", default=False),
             ),
+        ),
+        Setting(
+            "repos",
+            "Repos to watch for PRs with no reviewer",
+            required=False,
+            fetch=True,
+            help="owner/name or patterns, comma separated, e.g. acme/*, acme/widgets",
         ),
     )
     identity = ("account",)
@@ -65,6 +84,9 @@ class GitHubSource:
             search = ctx.http.get_json(f"{API}/search/issues", headers=headers, params={"q": REVIEW_QUERY, "per_page": 100})
             items += parse_review_search(search)
 
+        if "unreviewed" in watch:
+            items += self._unreviewed(ctx, headers)
+
         if not watch & {"comments", "mentions"}:
             return items
         notifications = ctx.http.get_json(f"{API}/notifications", headers=headers, params={"per_page": 50})
@@ -81,6 +103,77 @@ class GitHubSource:
                     comment = None  # still show the row, just without author/deep link
             if item := parse_notification(thread, comment):
                 items.append(item)
+        return items
+
+    def options(self, ctx: SyncContext, key: str) -> list[str]:
+        if key != "repos":
+            return []
+        headers = _headers(ctx.settings["token"])
+        names: list[str] = []
+        for page in range(1, MAX_REPO_PAGES + 1):
+            batch = ctx.http.get_json(f"{API}/user/repos", headers=headers, params={"per_page": 100, "page": page, "sort": "full_name"})
+            names += [r["full_name"] for r in batch if not r.get("archived")]
+            if len(batch) < 100:
+                break
+        return sorted(names, key=str.lower)
+
+    def _unreviewed(self, ctx: SyncContext, headers: dict[str, str]) -> list[Item]:
+        patterns = _split(ctx.settings.get("repos"))
+        if not patterns:
+            return []
+        literal = [p for p in patterns if not any(ch in p for ch in "*?[")]
+        repos, listed_all = literal, True
+        if len(literal) < len(patterns):
+            try:
+                repos = sorted(set(literal) | set(_matching(self.options(ctx, "repos"), patterns)))
+            except Exception as exc:
+                listed_all = False  # can't tell which repos the patterns cover: forget none
+                ctx.warnings.append(f"couldn't list repos for the patterns ({_short(exc)})")
+
+        me = str(ctx.settings.get("account", "")).lower()
+        memory = ctx.memory.setdefault("unreviewed", {})
+        memory.pop("baseline", None)  # older versions hid PRs that were already open; now they show, quietly
+        seen: list[str] = memory.setdefault("repos", [])  # repos synced at least once
+        reviewed: list[str] = memory.setdefault("reviewed", [])  # PR urls known to have a review
+        items: list[Item] = []
+        open_urls: set[str] = set()
+        listed: set[str] = set()
+        for repo in repos:
+            try:
+                pulls = ctx.http.get_json(f"{API}/repos/{repo}/pulls", headers=headers, params={"state": "open", "per_page": 100})
+            except Exception as exc:
+                ctx.warnings.append(f"{repo}: couldn't list pull requests ({_short(exc)})")
+                continue
+            listed.add(repo)
+            open_urls |= {pr["html_url"] for pr in pulls}
+            first_sight = repo not in seen
+            for pr in pulls:
+                url = pr["html_url"]
+                if not _waiting_for_reviewer(pr, me) or url in reviewed:
+                    continue
+                try:
+                    has_review = bool(ctx.http.get_json(f"{API}/repos/{repo}/pulls/{pr['number']}/reviews", headers=headers, params={"per_page": 1}))
+                except Exception:
+                    has_review = False  # better a stale row than a hidden one
+                if has_review:
+                    reviewed.append(url)
+                    continue
+                item = Item(
+                    id=f"unreviewed:{url}",
+                    action="no reviewer",
+                    title=pr["title"].strip(),
+                    url=url,
+                    repo=repo,
+                    author=pr["user"]["login"],
+                    updated_at=pr["updated_at"],
+                )
+                items.append(item)
+                if first_sight:
+                    ctx.quiet.add(item.id)  # already waiting when the repo was added: show, don't pop up
+        # forget repos no longer watched and PRs that closed, so memory doesn't grow forever
+        # (only for repos listed this time: a repo that failed stays "seen")
+        seen[:] = [r for r in seen if r in repos or not listed_all] + sorted(listed - set(seen))
+        reviewed[:] = [u for u in reviewed if u in open_urls or _repo_of(u) not in listed]
         return items
 
     def test_connection(self, ctx: SyncContext) -> str:
@@ -121,6 +214,36 @@ def _is_closed(ctx: SyncContext, headers: dict[str, str], thread: dict[str, Any]
         return ctx.http.get_json(url, headers=headers).get("state") == "closed"
     except Exception:
         return False
+
+
+def _waiting_for_reviewer(pr: dict[str, Any], me: str) -> bool:
+    """Open, not a draft, not mine, nobody asked to review and nobody assigned. Reviews are checked separately."""
+    return (
+        not pr.get("draft")
+        and (pr.get("user") or {}).get("login", "").lower() != me
+        and not pr.get("requested_reviewers")
+        and not pr.get("requested_teams")
+        and not pr.get("assignees")
+        and not pr.get("assignee")
+    )
+
+
+def _repo_of(html_url: str) -> str:
+    return "/".join(html_url.removeprefix("https://github.com/").split("/")[:2])
+
+
+def _matching(names: list[str], patterns: list[str]) -> list[str]:
+    return [n for n in names if any(fnmatch.fnmatch(n.lower(), p.lower()) for p in patterns)]
+
+
+def _split(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [p.strip() for p in str(value or "").split(",") if p.strip()]
+
+
+def _short(exc: Exception) -> str:
+    return (str(exc) or type(exc).__name__).splitlines()[0][:80]
 
 
 def _headers(token: str) -> dict[str, str]:

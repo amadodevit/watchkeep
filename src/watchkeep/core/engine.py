@@ -415,7 +415,7 @@ class Core:
             source = self._sources[source_id]
             memory = self._store.memory(source_id)  # fresh copy: a failed sync's changes are dropped
             try:
-                items, warnings = await asyncio.to_thread(
+                items, warnings, quiet = await asyncio.to_thread(
                     self._fetch, source, self._store.secrets.keys(source_id), memory
                 )
             except Exception as exc:  # a broken source must not take the core down
@@ -428,7 +428,7 @@ class Core:
                 if _kind(self._plugins[source.plugin]) == "samples":
                     events = self._apply_samples(source, items, memory, warnings)
                 else:
-                    events = self._apply(source, items, memory, warnings)
+                    events = self._apply(source, items, memory, warnings, quiet)
             finally:
                 self._bump()
         if events:
@@ -436,7 +436,7 @@ class Core:
 
     def _fetch(
         self, source: SourceConfig, secret_keys: tuple[str, ...], memory: dict
-    ) -> tuple[list[Item] | list[Sample], tuple[str, ...]]:
+    ) -> tuple[list[Item] | list[Sample], tuple[str, ...], frozenset[str]]:
         """Runs in a worker thread: no database access here. The plugin changes `memory` in place."""
         plugin = self._plugins[source.plugin]
         settings = {**source.settings, **self._store.secrets.read(source.id, secret_keys)}
@@ -451,9 +451,11 @@ class Core:
         if ctx.memory is not memory:  # replaced rather than changed in place
             memory.clear()
             memory.update(ctx.memory)
-        return result, tuple(str(w) for w in ctx.warnings)
+        return result, tuple(str(w) for w in ctx.warnings), frozenset(str(q) for q in ctx.quiet)
 
-    def _apply(self, source: SourceConfig, items: list[Item], memory: dict, warnings: tuple[str, ...]) -> list[Event]:
+    def _apply(
+        self, source: SourceConfig, items: list[Item], memory: dict, warnings: tuple[str, ...], quiet: frozenset[str] = frozenset()
+    ) -> list[Event]:
         now = self._clock()
         first_sync = self._store.source_state(source.id)[0] is None
         previous = self._store.snapshot(source.id)
@@ -469,7 +471,7 @@ class Core:
         return [
             self._event(NEW_ITEM, source, title=f"{source.name}: {item.action}", body=item.title, url=item.url)
             for item in diff.new
-            if item.id not in read
+            if item.id not in read and item.id not in quiet  # quiet: the plugin says show it, don't announce it
         ]
 
     def _apply_samples(

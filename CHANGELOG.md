@@ -8,6 +8,7 @@ Changes to the plugin contract are marked **Plugins**.
 - **Plugins:** the entry-point group is now `watchkeep.sources` and the contract imports from `watchkeep.core.plugin`. Breaking for plugins written against the unreleased fly-monitor name; nothing was published under it.
 - Terminal UI with sources grouped and collapsible.
 - GitHub source: review requests, comments and mentions, accounts detected through `gh`.
+- GitHub source: optional "PRs with no reviewer" in picked repos (names or patterns): open PRs nobody was asked to review, assigned or reviewed yet, drafts and your own skipped. PRs already waiting when a repo is first watched show without a popup.
 - Website source: status code and response time, failing after 5 of the last 10 checks.
 - Desktop and in-app notifications, acknowledge and close, ignore.
 - Secrets live in the OS keyring. Older databases are migrated on startup.
@@ -22,6 +23,7 @@ Changes to the plugin contract are marked **Plugins**.
 - **Plugins:** optional `title`; declared metrics become the columns of your rows.
 - Edit a source in place (`e`): everything but its identity (URL, account). History is kept.
 - **Plugins:** `Metric`, `Check`/`Condition` and `default_checks` for samples plugins; `Setting.fetch` with the `options(ctx, key)` hook.
+- **Plugins:** `SyncContext.quiet`: item ids to show without a notification when new (additive).
 - **Plugins:** `SyncContext.memory` (per-source state the core keeps between successful syncs), `SyncContext.warnings` (partial failures shown on the source row) and `ctx.http.get` (raw response, for XML and conditional GETs). All additive: existing plugins need no change.
 - Read and archive for item sources (GitHub, feeds, any items plugin): mark an item read to hide it for good; the archive keeps every item ever reported, with when it appeared and when it was read, and can mark it unread. Kept in the core, so plugins need no change.
 - **Plugins:** first version of the contract, see [PLUGINS.md](PLUGINS.md).

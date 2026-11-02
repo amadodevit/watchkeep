@@ -235,6 +235,12 @@ class AddSourceScreen(SourceFields, ModalScreen[list[str]]):
             widgets.append(
                 SelectionList(*((c.label, c.value, c.default) for c in setting.choices), id=f"setting-{setting.key}")
             )
+        for setting in self._watch_fields():
+            widgets.append(Label(setting.label, classes="field"))
+            field = Input(id=f"setting-{setting.key}", placeholder=setting.default or "")
+            widgets.append(Horizontal(field, Button("Fetch", id=f"fetch-{setting.key}"), classes="fetch"))
+            if setting.help:
+                widgets.append(Static(setting.help, classes="help"))
         widgets.append(
             Collapsible(
                 Label("Sync interval", classes="field"),
@@ -307,6 +313,7 @@ class AddSourceScreen(SourceFields, ModalScreen[list[str]]):
             for s in self.plugin.settings
             if s.choices
         }
+        choices.update(self._watch_values())
         names = self.query("#name")
         typed = names.first(Input).value.strip() if names else ""
         if self._manual is not None:
@@ -338,6 +345,18 @@ class AddSourceScreen(SourceFields, ModalScreen[list[str]]):
     def _identity_settings(self):
         return [s for s in self.plugin.settings if not s.choices] if self.plugin else []
 
+    def _watch_fields(self):
+        """Optional picker fields (e.g. GitHub repos) the manual step would have shown.
+
+        A detected source skips the manual step, so they go in the watch step instead.
+        """
+        if not self.plugin or self._manual is not None:
+            return []
+        return [s for s in self.plugin.settings if s.fetch and not s.choices and not s.required and not s.secret]
+
+    def _watch_values(self) -> dict[str, str]:
+        return {s.key: self.query_one(f"#setting-{s.key}", Input).value.strip() for s in self._watch_fields()}
+
     def _manual_values(self) -> dict[str, str]:
         return {s.key: self.query_one(f"#setting-{s.key}", Input).value.strip() for s in self._identity_settings()}
 
@@ -350,6 +369,9 @@ class AddSourceScreen(SourceFields, ModalScreen[list[str]]):
         self.query_one("#title", Static).update(Text(text))
 
     def _fetch_settings(self) -> tuple[dict[str, str], str | None]:
+        if self.step == "watch":
+            base = dict(self._chosen[0].settings) if self._chosen else dict(self._manual or {})
+            return {**base, **self._watch_values()}, None
         return self._manual_values(), None
 
 

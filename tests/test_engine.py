@@ -549,3 +549,21 @@ def test_read_of_unknown_item_raises_and_remove_source_clears_archive(setup):
     plugin.next = [item("a")]
     asyncio.run(core.sync_now())
     assert set(items_of(core)) == {"a"}  # not read under a reused id
+
+
+def test_quiet_items_show_without_a_notification(setup):
+    core, plugin, clock = setup
+    plugin.next = [item("a")]
+    asyncio.run(core.sync_now())  # first sync: quiet anyway
+    original = plugin.sync
+
+    def sync(ctx):
+        ctx.quiet.add("b")
+        return original(ctx)
+
+    plugin.sync = sync
+    clock.now += 700
+    plugin.next = [item("a"), item("b"), item("c")]
+    asyncio.run(core.sync_now())
+    assert set(items_of(core)) == {"a", "b", "c"}
+    assert [e.body for e in core.events_since(0)] == ["c"]

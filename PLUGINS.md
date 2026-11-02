@@ -136,7 +136,7 @@ Users can type a reference instead of the secret:
 
 Never log or return a secret in a summary or error message.
 
-## Memory and warnings
+## Memory, warnings and quiet items
 
 `ctx.memory` is a dict the core keeps for each source between syncs. Change it in place, for
 example to remember an ETag or which posts you have already seen. The core saves it only when
@@ -147,7 +147,12 @@ JSON data (dicts, lists, strings, numbers) and small. Never put a secret in it.
 worth showing, e.g. `"feeds.example.com: timeout"` when one feed of five is down. They show on the
 source's row until the next sync without warnings. If nothing useful came back, raise instead.
 
-Both default to empty, so plugins that don't use them need no change.
+`ctx.quiet` is a set of item ids that should show without a notification when they are new. Use
+it for things that were already there before the user asked to watch them, e.g. the open PRs of a
+repo added to an existing source. It only applies to that sync. (On a source's very first sync the
+core announces nothing anyway.)
+
+All three default to empty, so plugins that don't use them need no change.
 
 ## Testing
 

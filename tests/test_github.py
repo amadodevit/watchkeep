@@ -121,3 +121,102 @@ def test_subject_without_state_is_kept():
     http = FakeHttp({})
     assert _is_closed(SyncContext(settings={}, http=http), {}, thread) is False
     assert http.calls == []
+
+
+# -- PRs with no reviewer -------------------------------------------------------
+
+PULLS = "https://api.github.com/repos/acme/widgets/pulls"
+
+
+def reviews(url):
+    return f"{url.replace('https://github.com/', 'https://api.github.com/repos/').replace('/pull/', '/pulls/')}/reviews"
+
+
+def unreviewed_routes(pulls):
+    routes = {PULLS: pulls}
+    for pr in pulls:
+        routes[reviews(pr["html_url"])] = [{"id": 1}] if pr["number"] == 56 else []
+    return routes
+
+
+def unreviewed_sync(pulls, memory, repos="acme/widgets", http=None):
+    http = http or FakeHttp(unreviewed_routes(pulls))
+    ctx = SyncContext(settings={"account": "Me", "token": "t", "watch": ["unreviewed"], "repos": repos}, http=http, memory=memory)
+    return GitHubSource().sync(ctx), ctx, http
+
+
+def test_first_sync_of_a_repo_shows_waiting_prs_quietly():
+    memory = {}
+    items, ctx, _ = unreviewed_sync(load("pulls_widgets.json"), memory)
+    assert [(i.id, i.action, i.title, i.repo, i.author) for i in items] == [
+        ("unreviewed:https://github.com/acme/widgets/pull/50", "no reviewer", "Add sprocket cache", "acme/widgets", "dave")
+    ]
+    assert ctx.quiet == {"unreviewed:https://github.com/acme/widgets/pull/50"}
+    assert memory["unreviewed"]["repos"] == ["acme/widgets"]
+
+
+def test_later_prs_are_not_quiet_and_reviews_are_remembered():
+    memory = {"unreviewed": {"repos": ["acme/widgets"]}}
+    items, ctx, _ = unreviewed_sync(load("pulls_widgets.json"), memory)
+    assert [i.id for i in items] == ["unreviewed:https://github.com/acme/widgets/pull/50"]
+    assert ctx.quiet == set()
+    # the reviewed PR is remembered, so the next sync doesn't ask again
+    assert memory["unreviewed"]["reviewed"] == ["https://github.com/acme/widgets/pull/56"]
+    _, _, http = unreviewed_sync(load("pulls_widgets.json"), memory)
+    assert reviews("https://github.com/acme/widgets/pull/56") not in [url for url, _ in http.calls]
+
+
+def test_old_hidden_baseline_is_dropped_so_those_prs_show_quietly():
+    memory = {"unreviewed": {"baseline": {"acme/widgets": ["https://github.com/acme/widgets/pull/50"]}}}
+    items, ctx, _ = unreviewed_sync(load("pulls_widgets.json"), memory)
+    assert "baseline" not in memory["unreviewed"]
+    assert [i.id for i in items] == ["unreviewed:https://github.com/acme/widgets/pull/50"]
+    assert ctx.quiet == {i.id for i in items}
+
+
+def test_unwatched_repos_are_forgotten():
+    memory = {"unreviewed": {"repos": ["acme/widgets", "acme/old"]}}
+    unreviewed_sync([], memory)
+    assert memory["unreviewed"]["repos"] == ["acme/widgets"]
+
+
+def test_failed_repo_listing_warns_and_keeps_it_seen():
+    class Failing(FakeHttp):
+        def get_json(self, url, *, headers=None, params=None):
+            raise RuntimeError("404 Not Found")
+
+    memory = {"unreviewed": {"repos": ["acme/widgets"]}}
+    items, ctx, _ = unreviewed_sync([], memory, http=Failing({}))
+    assert items == []
+    assert ctx.warnings == ["acme/widgets: couldn't list pull requests (404 Not Found)"]
+    assert memory["unreviewed"]["repos"] == ["acme/widgets"]
+
+
+def test_patterns_expand_through_the_repo_list():
+    class Paged(FakeHttp):
+        def get_json(self, url, *, headers=None, params=None):
+            if url.endswith("/user/repos"):
+                self.calls.append((url, headers))
+                return [{"full_name": "acme/widgets"}, {"full_name": "acme/gears", "archived": True}, {"full_name": "other/x"}]
+            return super().get_json(url, headers=headers, params=params)
+
+    memory = {}
+    _, _, http = unreviewed_sync(load("pulls_widgets.json"), memory, repos="ACME/*", http=Paged(unreviewed_routes(load("pulls_widgets.json"))))
+    assert memory["unreviewed"]["repos"] == ["acme/widgets"]
+
+
+def test_repo_picker_pages_until_a_short_page():
+    class Pages(FakeHttp):
+        def get_json(self, url, *, headers=None, params=None):
+            self.calls.append((url, params["page"]))
+            return [{"full_name": f"o/r{params['page']}-{i}"} for i in range(100 if params["page"] == 1 else 3)]
+
+    http = Pages({})
+    names = GitHubSource().options(SyncContext(settings={"account": "me", "token": "t"}, http=http), "repos")
+    assert len(names) == 103
+    assert [page for _, page in http.calls] == [1, 2]
+
+
+def test_unreviewed_is_opt_in():
+    _, calls = sync_with(None)
+    assert PULLS not in calls
