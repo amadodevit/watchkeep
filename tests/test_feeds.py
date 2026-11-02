@@ -40,7 +40,7 @@ class FakeJudge:
         self.calls.append([p.title for p in posts])
         if self.fail:
             raise RuntimeError("model unavailable")
-        return {n: self.picks[p.title] for n, p in enumerate(posts) if p.title in self.picks}
+        return {n: (p.title in self.picks, self.picks.get(p.title, "off topic")) for n, p in enumerate(posts)}
 
 
 @pytest.fixture
@@ -167,7 +167,7 @@ def test_removed_feeds_are_forgotten(judge):
 
 def test_judge_sends_interests_and_numbered_posts_and_reads_the_json():
     class Block:
-        type, text = "text", '{"matches": [{"n": 1, "reason": "agents"}]}'
+        type, text = "text", '{"verdicts": [{"n": 0, "match": false, "reason": "retries"}, {"n": 1, "match": true, "reason": "agents"}]}'
 
     class Response:
         stop_reason, content = "end_turn", [Block()]
@@ -183,7 +183,9 @@ def test_judge_sends_interests_and_numbered_posts_and_reads_the_json():
     _, rss_posts = parse_feed(RSS)
     _, atom_posts = parse_feed(ATOM)
     client = Client()
-    assert feeds.judge(client, "claude-haiku-5-5", "AI agents", rss_posts[:1] + atom_posts) == {1: "agents"}
+    assert feeds.judge(client, "claude-haiku-5-5", "AI agents", rss_posts[:1] + atom_posts) == {
+        0: (False, "retries"), 1: (True, "agents")
+    }
     sent = client.messages.kwargs
     assert sent["model"] == "claude-haiku-5-5"
     assert sent["output_config"]["format"]["type"] == "json_schema"
@@ -191,3 +193,22 @@ def test_judge_sends_interests_and_numbered_posts_and_reads_the_json():
     assert "<interests>\nAI agents\n</interests>" in prompt
     assert "[0] Retries without tears (Example Engineering)" in prompt
     assert "[1] Agents and code review (Notes from Bea)" in prompt
+
+
+def test_rejected_posts_are_kept_with_the_reason_until_they_expire(judge, monkeypatch):
+    memory = {"feeds": {BLOG: {"seen": []}}}
+    monkeypatch.setattr(feeds.time, "time", lambda: 1_000_000.0)
+    assert FeedsSource().sync(ctx(FakeHttp({BLOG: RSS}), memory, urls=(BLOG,))) == []
+    rejected = memory["rejected"]["https://blog.example.com/retries/"]
+    assert (rejected["title"], rejected["reason"], rejected["judged"]) == ("Retries without tears", "off topic", 1_000_000.0)
+    monkeypatch.setattr(feeds.time, "time", lambda: 1_000_000.0 + feeds.KEEP_DAYS * 86400 + 1)
+    FeedsSource().sync(ctx(FakeHttp({BLOG: RSS}), memory, urls=(BLOG,)))
+    assert memory["rejected"] == {}
+
+
+def test_a_post_the_model_skips_counts_as_rejected(monkeypatch):
+    monkeypatch.setattr(feeds, "_client", lambda settings: object())
+    monkeypatch.setattr(feeds, "judge", lambda *a: {1: (True, "agents")})
+    _, posts = parse_feed(RSS)
+    picked, turned_down = feeds.pick(posts, "AI agents", {})
+    assert list(picked.values()) == ["agents"] and list(turned_down.values()) == [feeds.NO_VERDICT]

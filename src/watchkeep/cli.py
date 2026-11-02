@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from watchkeep.core.config import config_path, data_path, load_config
 from watchkeep.core.engine import Core
@@ -13,6 +14,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="watchkeep")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("check", help="test each source's connection and exit")
+    sub.add_parser("rejected", help="list feed posts the model turned down, with its reason")
     args = parser.parse_args(argv)
 
     store = Store(data_path())
@@ -25,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "check":
         return _check(core)
+    if args.command == "rejected":
+        return _rejected(core, store)
 
     from watchkeep.ui.app import WatchkeepApp  # keep `check` fast and UI-free
 
@@ -73,6 +77,21 @@ def _check(core: Core) -> int:
             failed += 1
             print(f"✗ {source_id}: {exc}")
     return 1 if failed else 0
+
+
+def _rejected(core: Core, store: Store) -> int:
+    """Feed posts judged and turned down in the last KEEP_DAYS, newest first."""
+    rows = []
+    for source_id in core.source_ids():
+        for post in store.memory(source_id).get("rejected", {}).values():
+            rows.append(post)
+    if not rows:
+        print("No rejected posts yet. They are recorded from the next feeds sync on.")
+        return 0
+    for post in sorted(rows, key=lambda p: p["judged"], reverse=True):
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(post["judged"]))
+        print(f"{when}  {post['site']}: {post['title']}\n    {post['reason']}\n    {post['url']}")
+    return 0
 
 
 if __name__ == "__main__":

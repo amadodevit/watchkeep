@@ -4,11 +4,14 @@ A feed seen for the first time only records what is already there, so you get
 posts published after you added it. Each sync, posts not seen before go to a
 Claude model in one call, together with your interests; the ones it picks
 become items, labelled with the model's reason for picking them. They stay
-until you ignore them or they are KEEP_DAYS old.
+until you ignore them or they are KEEP_DAYS old. The ones it turns down are
+kept for KEEP_DAYS too, with its reason, so `watchkeep rejected` can answer
+"why didn't I get that post?".
 
 Everything the plugin needs between syncs lives in ctx.memory:
     {"feeds":   {url: {"etag", "modified", "site", "seen": [post ids]}},
-     "matches": {post id: {"item": Item dict, "found": ts}}}
+     "matches": {post id: {"item": Item dict, "found": ts}},
+     "rejected": {post id: {"title", "url", "site", "reason", "judged": ts}}}
 If the model call fails the sync raises, the core keeps the old memory, and the
 same posts are judged on the next sync.
 """
@@ -67,6 +70,7 @@ class FeedsSource:
         memory = ctx.memory
         feeds_memory = memory.setdefault("feeds", {})
         matches = memory.setdefault("matches", {})
+        rejected = memory.setdefault("rejected", {})
         urls = parse_urls(ctx.settings["feeds"])
 
         fresh: list[Post] = []
@@ -90,14 +94,19 @@ class FeedsSource:
             raise RuntimeError("; ".join(ctx.warnings))
 
         now = time.time()
-        for post, reason in pick(fresh, ctx.settings["interests"], ctx.settings).items():
+        picked, turned_down = pick(fresh, ctx.settings["interests"], ctx.settings)
+        for post, reason in picked.items():
             matches[post.id] = {"item": post.item(reason).to_dict(), "found": now}
+        for post, reason in turned_down.items():
+            rejected[post.id] = {"title": post.title, "url": post.url, "site": post.site, "reason": reason, "judged": now}
 
         for url in set(feeds_memory) - set(urls):
             del feeds_memory[url]  # feed removed in the edit screen
         cutoff = now - KEEP_DAYS * 86400
         for post_id in [k for k, m in matches.items() if m["found"] < cutoff]:
             del matches[post_id]
+        for post_id in [k for k, r in rejected.items() if r["judged"] < cutoff]:
+            del rejected[post_id]
         return [Item.from_dict(m["item"]) for m in matches.values()]
 
     def test_connection(self, ctx: SyncContext) -> str:
@@ -241,47 +250,68 @@ def _problem(exc: Exception) -> str:
 
 # -- judging -------------------------------------------------------------------
 
-SYSTEM = """You filter new blog posts for one reader.
-Pick the posts the reader would likely want to read, given their interests.
-Be selective: a post that only mentions a topic in passing does not match.
-Posts and interests may be in different languages; judge the meaning.
-For each match give a short reason in English, under 15 words."""
+SYSTEM = """You decide which new blog posts one reader should read.
+
+You get the reader's interests and a numbered list of posts, each with a title,
+the site, and the start of its text. Give a verdict for every post.
+
+A post matches when its main subject is one of the interests, or it gives the
+reader something concrete to use on one: a design decision, a lesson from
+production, a tool tried on real work. Judge the post, not the site.
+
+It does not match when:
+- the topic only comes up in passing, or the post is mostly about something else;
+- it is news, an announcement or a promotion with no analysis;
+- it falls under anything the reader says they are not interested in.
+
+When in doubt, leave it out: the reader prefers missing a post to wading
+through noise. Posts and interests may be in different languages; judge the
+meaning. Write each reason in English, under 15 words, naming the interest it
+matches or what it is really about."""
 
 SCHEMA = {
     "type": "object",
     "properties": {
-        "matches": {
+        "verdicts": {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {"n": {"type": "integer"}, "reason": {"type": "string"}},
-                "required": ["n", "reason"],
+                "properties": {
+                    "n": {"type": "integer"},
+                    "match": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["n", "match", "reason"],
                 "additionalProperties": False,
             },
         }
     },
-    "required": ["matches"],
+    "required": ["verdicts"],
     "additionalProperties": False,
 }
 
+NO_VERDICT = "the model gave no verdict for this post"
 
-def pick(posts: list[Post], interests: str, settings: dict) -> dict[Post, str]:
-    """The posts that match, with the model's reason. Raises if the model can't answer."""
+
+def pick(posts: list[Post], interests: str, settings: dict) -> tuple[dict[Post, str], dict[Post, str]]:
+    """(matches, rejections), each post with the model's reason. Raises if the model can't answer."""
     if not posts:
-        return {}
+        return {}, {}
     client = _client(settings)
     model = settings.get("model") or DEFAULT_MODEL
     picked: dict[Post, str] = {}
+    turned_down: dict[Post, str] = {}
     for start in range(0, len(posts), BATCH):
         batch = posts[start : start + BATCH]
-        for n, reason in judge(client, model, interests, batch).items():
-            if 0 <= n < len(batch):
-                picked[batch[n]] = reason
-    return picked
+        verdicts = judge(client, model, interests, batch)
+        for n, post in enumerate(batch):
+            match, reason = verdicts.get(n, (False, NO_VERDICT))
+            (picked if match else turned_down)[post] = reason
+    return picked, turned_down
 
 
-def judge(client, model: str, interests: str, posts: list[Post]) -> dict[int, str]:
-    """One model call. Returns {post number: reason} for the posts that match."""
+def judge(client, model: str, interests: str, posts: list[Post]) -> dict[int, tuple[bool, str]]:
+    """One model call. Returns {post number: (matches, reason)}."""
     listing = "\n\n".join(f"[{n}] {p.title} ({p.site})\n{p.text}" for n, p in enumerate(posts))
     import anthropic
 
@@ -304,7 +334,7 @@ def judge(client, model: str, interests: str, posts: list[Post]) -> dict[int, st
     if response.stop_reason == "max_tokens":
         raise RuntimeError("the model's answer was cut off")
     text = next((b.text for b in response.content if b.type == "text"), "")
-    return {m["n"]: m["reason"] for m in json.loads(text)["matches"]}
+    return {v["n"]: (v["match"], v["reason"]) for v in json.loads(text)["verdicts"]}
 
 
 def _client(settings: dict):
