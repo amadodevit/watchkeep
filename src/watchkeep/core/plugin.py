@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from .connections import HttpConnection
-from .models import Item
+from .models import Appointment, Item, Sample
 
 
 @dataclass(frozen=True)
@@ -88,11 +88,18 @@ class SourcePlugin(Protocol):
     connection: str  # connection type the core must provide, e.g. "http"
     settings: tuple[Setting, ...]
 
-    def sync(self, ctx: SyncContext) -> list[Item]:
-        """Return everything currently true. Items missing from the result are resolved."""
+    def sync(self, ctx: SyncContext) -> list[Item] | list[Sample] | list[Appointment]:
+        """Return everything currently true: Items, Samples or Appointments, matching `kind`.
+
+        Items missing from the result are resolved.
+        """
         ...
 
     # Optional members (checked with hasattr/getattr, so not part of the Protocol check):
+    #
+    #   kind: str
+    #       "items" (default), "samples" or "events". Events plugins return
+    #       Appointment objects; the core keeps them for the Agenda tab, no notifications.
     #
     #   identity: tuple[str, ...]
     #       Setting keys that identify a source, e.g. ("account",). Lets the core

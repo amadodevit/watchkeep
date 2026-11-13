@@ -2,7 +2,9 @@
 
 Panels are tabs over one overview table: switching a panel only changes which
 sources the table is built from, so grouping, folding and the cursor work the
-same in every panel. The last tab, Notifications, lists this session's events.
+same in every panel. After the panels come the fixed tabs, each with its own
+table: Agenda (only while an events source exists), Notifications (this
+session's events) and Archive.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from watchkeep.ui.panels import PanelsScreen, new_panel_id
 
 NOTIFICATIONS = "tab-notifications"
 ARCHIVE = "tab-archive"
+AGENDA = "tab-agenda"
+FIXED = {-1: NOTIFICATIONS, -2: ARCHIVE, -3: AGENDA}  # fixed tab index -> tab id
 EVENT_LABELS = {FAILING_EVENT: Text("failing", style="bold red"), RECOVERED: Text("recovered", style="green")}
 
 
@@ -41,6 +45,7 @@ class WatchkeepApp(App):
         *(Binding(str(n), f"panel({n - 1})", f"Panel {n}", show=False) for n in range(1, 10)),
         ("p", "panels", "Panels"),
         ("P", "panel_from_group", "Panel from group"),
+        ("C", "calendar", "Calendar"),
         ("enter", "open", "Open"),
         ("r", "sync", "Sync now"),
         ("a", "add", "Add source"),
@@ -68,9 +73,12 @@ class WatchkeepApp(App):
         self._events: list[Event] = []  # this session's, oldest first; the core keeps the last 200
         self._event_urls: dict[str, str] = {}
         self._archived: dict[str, tuple[str, str, str, bool]] = {}  # row key -> (source id, item id, url, read)
+        self._agenda_urls: dict[str, str] = {}
+        self._before_agenda = 0  # where C goes back to
+        self._has_agenda = layout.has_events(core.get_state(), self._plugin_infos())
         self._panels: list[Panel] = core.panels()
         active = core.active_panel()
-        self._active = next((i for i, p in enumerate(self._panels) if p.id == active), 0)  # index, or -1 Notifications, -2 Archive
+        self._active = next((i for i, p in enumerate(self._panels) if p.id == active), 0)  # index, or a FIXED key
         levels = dict(layout.PRESETS).get(core.preference("grouping"), layout.PRESETS[0][1])
         self._view = layout.View(levels=levels, depth=len(levels))
 
@@ -80,6 +88,7 @@ class WatchkeepApp(App):
         yield DataTable(id="overview", cursor_type="row", show_header=False)
         yield DataTable(id="notifications", cursor_type="row", show_header=False)
         yield DataTable(id="archive", cursor_type="row")
+        yield DataTable(id="agenda", cursor_type="row")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -87,6 +96,7 @@ class WatchkeepApp(App):
         self._overview.add_columns(*["" for _ in range(layout.VALUE_COLUMNS + 3)])
         self._event_table.add_columns("", "", "", "")
         self._archive_table.add_columns("arrived", "read", "source", "item", "")
+        self._agenda_table.add_columns(*layout.AGENDA_COLUMNS)
         self._show_active()
         self.run_worker(self.core.run(), group="core")
         self.set_interval(1, self._poll)
@@ -109,9 +119,19 @@ class WatchkeepApp(App):
             self._draw(state)
             if self._active == -2:
                 self._draw_archive()
+            if self._active == -3:
+                self._draw_agenda(state)
+            if layout.has_events(state, self._plugin_infos()) != self._has_agenda:
+                self.call_later(self._toggle_agenda)
 
     def _redraw(self) -> None:
-        self._draw(self.core.get_state())
+        state = self.core.get_state()
+        self._draw(state)
+        if self._active == -3:
+            self._draw_agenda(state)  # what is over or happening now moves with the clock
+
+    def _plugin_infos(self) -> dict:
+        return {p.name: p for p in self.core.list_plugins()}
 
     @property
     def _overview(self) -> DataTable:
@@ -124,6 +144,10 @@ class WatchkeepApp(App):
     @property
     def _archive_table(self) -> DataTable:
         return self.query_one("#archive", DataTable)
+
+    @property
+    def _agenda_table(self) -> DataTable:
+        return self.query_one("#agenda", DataTable)
 
     def _panel(self) -> Panel:
         return self._panels[self._active] if self._active >= 0 else self._panels[0]
@@ -169,11 +193,16 @@ class WatchkeepApp(App):
     # -- panels ----------------------------------------------------------------
 
     def _tab_id(self, index: int) -> str:
-        return {-1: NOTIFICATIONS, -2: ARCHIVE}.get(index, f"tab-{index}")
+        return FIXED.get(index, f"tab-{index}")
+
+    def _order(self) -> list[int]:
+        """Tab indexes left to right: panels, then Agenda (if any), Notifications, Archive."""
+        return [*range(len(self._panels)), *([-3] if self._has_agenda else []), -1, -2]
 
     def _tabs(self, state: State | None = None) -> list[Tab]:
         tabs = [Tab(self._tab_label(i, p, state), id=self._tab_id(i)) for i, p in enumerate(self._panels)]
-        return [*tabs, Tab("Notifications", id=NOTIFICATIONS), Tab("Archive", id=ARCHIVE)]
+        names = {-3: "Agenda", -1: "Notifications", -2: "Archive"}
+        return [*tabs, *(Tab(names[i], id=FIXED[i]) for i in self._order() if i < 0)]
 
     def _tab_label(self, index: int, panel: Panel, state: State | None) -> Text:
         label = Text(f"{index + 1} {panel.name}" if index < 9 else panel.name)
@@ -191,16 +220,18 @@ class WatchkeepApp(App):
                 pass  # tab is being rebuilt
 
     def _show_active(self) -> None:
-        tables = {-1: self._event_table, -2: self._archive_table}
+        tables = {-1: self._event_table, -2: self._archive_table, -3: self._agenda_table}
         shown = tables.get(self._active, self._overview)
         for table in (self._overview, *tables.values()):
             table.display = table is shown
         shown.focus()
         if self._active == -2:
             self._draw_archive()
+        if self._active == -3:
+            self._draw_agenda(self.core.get_state())
 
     def _switch(self, index: int) -> None:
-        """Show panel `index` (-1 Notifications, -2 Archive) and remember it across restarts."""
+        """Show panel `index` (or a FIXED tab) and remember panels across restarts."""
         self._active = index
         if index >= 0:
             self.core.set_active_panel(self._panels[index].id)
@@ -212,12 +243,14 @@ class WatchkeepApp(App):
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
         tab_id = event.tab.id or ""
-        index = {NOTIFICATIONS: -1, ARCHIVE: -2}.get(tab_id) or int(tab_id.removeprefix("tab-"))
+        index = {v: k for k, v in FIXED.items()}.get(tab_id)
+        if index is None:
+            index = int(tab_id.removeprefix("tab-"))
         if index != self._active:
             self._switch(index)
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if action in ("next_panel", "previous_panel", "panel", "panel_from_group", "panels"):
+        if action in ("next_panel", "previous_panel", "panel", "panel_from_group", "panels", "calendar"):
             return len(self.screen_stack) == 1  # in a form, Tab moves between fields and keys type
         return True
 
@@ -226,8 +259,19 @@ class WatchkeepApp(App):
             self._switch(index)
 
     def _step(self, by: int) -> None:
-        order = [*range(len(self._panels)), -1, -2]  # Notifications, then Archive, last
+        order = self._order()
         self._switch(order[(order.index(self._active) + by) % len(order)])
+
+    def action_calendar(self) -> None:
+        """C: jump to the Agenda, or back to where you were if already there."""
+        if self._active == -3:
+            self._switch(self._before_agenda if self._before_agenda in self._order() else 0)
+            return
+        if not self._has_agenda:
+            self.notify("No calendar yet: press a to add one", severity="warning")
+            return
+        self._before_agenda = self._active
+        self._switch(-3)
 
     def action_next_panel(self) -> None:
         self._step(1)
@@ -262,6 +306,17 @@ class WatchkeepApp(App):
         """Re-read panels after a save and show panel `show` (None: Notifications)."""
         self._panels = self.core.panels()
         index = -1 if show is None else next((i for i, p in enumerate(self._panels) if p.id == show), 0)
+        await self._rebuild_tabs(index)
+
+    async def _toggle_agenda(self) -> None:
+        """The first events source was added, or the last one removed: show or drop the Agenda tab."""
+        has = layout.has_events(self.core.get_state(), self._plugin_infos())
+        if has == self._has_agenda:
+            return
+        self._has_agenda = has
+        await self._rebuild_tabs(0 if self._active == -3 and not has else self._active)
+
+    async def _rebuild_tabs(self, index: int) -> None:
         # A fresh strip, born on the right tab: rebuilding in place re-activates the first tab.
         await self.query_one(Tabs).remove()
         tabs = Tabs(*self._tabs(self.core.get_state()), active=self._tab_id(index))
@@ -282,6 +337,25 @@ class WatchkeepApp(App):
             table.add_row(Text(when, style="dim"), kind, Text(event.body), Text(event.source_name, style="dim"), key=key)
             if event.url:
                 self._event_urls[key] = event.url
+
+    # -- agenda ----------------------------------------------------------------
+
+    def _draw_agenda(self, state: State) -> None:
+        table = self._agenda_table
+        selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value if table.row_count else None
+        table.clear()
+        fixed = sum(layout.AGENDA_WIDTHS.values()) + 2 * len(layout.AGENDA_COLUMNS)
+        rows = layout.agenda(state, self._plugin_infos(), title_width=max(20, self.size.width - fixed))
+        self._agenda_urls = {r.key: r.url for r in rows if r.url}
+        if not rows:
+            table.add_row(Text(" nothing on ", style="reverse"), "", Text("no appointments left today", style="dim"), "", "", key="none")
+        for row in rows:
+            table.add_row(*row.cells, key=row.key)
+        if selected is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(selected))
+            except Exception:
+                pass  # over and gone
 
     # -- archive ---------------------------------------------------------------
 
@@ -315,6 +389,8 @@ class WatchkeepApp(App):
             self._browse(self._event_urls.get(key))
         elif event.data_table.id == "archive":
             self._browse(self._archived[key][2] if key in self._archived else None)
+        elif event.data_table.id == "agenda":
+            self._browse(self._agenda_urls.get(key))
         else:
             self._open(key)
 
@@ -322,6 +398,11 @@ class WatchkeepApp(App):
         if self._active == -2:
             row = self._selected_archived()
             self._browse(row[2] if row else None)
+            return
+        if self._active == -3:
+            table = self._agenda_table
+            if table.row_count:
+                self._browse(self._agenda_urls.get(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value or ""))
             return
         table = self._event_table if self._active < 0 else self._overview
         if not table.row_count:

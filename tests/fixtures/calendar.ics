@@ -1,0 +1,57 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Example//Calendar//EN
+X-WR-CALNAME:Work
+X-WR-TIMEZONE:Europe/Lisbon
+BEGIN:VEVENT
+UID:standup@example.com
+SUMMARY:Standup
+DTSTART;TZID=Europe/Lisbon:20261102T093000
+DTEND;TZID=Europe/Lisbon:20261102T094500
+RRULE:FREQ=WEEKLY;BYDAY=MO
+EXDATE;TZID=Europe/Lisbon:20261109T093000
+END:VEVENT
+BEGIN:VEVENT
+UID:offsite@example.com
+SUMMARY:Team offsite
+DTSTART;VALUE=DATE:20261116
+DTEND;VALUE=DATE:20261118
+END:VEVENT
+BEGIN:VEVENT
+UID:review@example.com
+SUMMARY:Design review
+DTSTART;TZID=America/New_York:20261116T100000
+DTEND;TZID=America/New_York:20261116T110000
+DESCRIPTION:Agenda in the doc.\nJoin: https://meet.example.com/abc-defg
+ATTENDEE;CN=Ana Example:mailto:ana@example.com
+ATTENDEE:mailto:bob@example.com
+ATTENDEE;CN=Carla Example:mailto:carla@example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:cancelled@example.com
+SUMMARY:Cancelled sync
+STATUS:CANCELLED
+DTSTART;TZID=Europe/Lisbon:20261116T120000
+DTEND;TZID=Europe/Lisbon:20261116T123000
+END:VEVENT
+BEGIN:VEVENT
+UID:gym@example.com
+SUMMARY:Gym
+DTSTART:20261116T180000
+DTEND:20261116T190000
+END:VEVENT
+BEGIN:VEVENT
+UID:later@example.com
+SUMMARY:Planning
+DTSTART;TZID=Europe/Lisbon:20261120T140000
+DTEND;TZID=Europe/Lisbon:20261120T150000
+URL:https://calendar.example.com/event/planning
+END:VEVENT
+BEGIN:VEVENT
+UID:sync@example.com
+SUMMARY:Daily sync
+DTSTART;TZID=Europe/Lisbon:20261117T100000
+DTEND;TZID=Europe/Lisbon:20261117T102000
+DESCRIPTION:Notes: <https://nam01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fwiki.example.com%2Fsync&data=x>\nNeed help? <https://nam01.safelinks.protection.outlook.com/?url=https%3A%2F%2Faka.ms%2FJoinTeamsMeeting&data=x>\nJoin the meeting now <https://nam01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fteams.microsoft.com%2Fl%2Fmeetup-join%2F19%253ameeting_abc%2540thread.v2%2F0&data=x>
+END:VEVENT
+END:VCALENDAR

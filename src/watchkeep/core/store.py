@@ -6,6 +6,9 @@ between syncs, such as which posts it has already seen. Never secrets.
 And the item history: every item an items source has ever reported, kept after
 it leaves the snapshot, with when it was first seen and when the user marked it
 read. Read state lives here, not in the plugin, so any items plugin gets it.
+
+And the last appointments each events source reported, so the agenda shows on
+startup before the first sync.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from keyring.errors import KeyringError
 from .config import SourceConfig
 from .connections import is_reference
 from .health import Health
-from .models import Item, Sample
+from .models import Appointment, Item, Sample
 
 SAMPLES_KEPT = 50  # per row; enough for any reasonable rule window
 KEYRING_SERVICE = "watchkeep"
@@ -93,6 +96,13 @@ CREATE TABLE IF NOT EXISTS item_history (
     first_seen REAL NOT NULL,
     read_at    REAL,
     PRIMARY KEY (source_id, item_id)
+);
+-- The last snapshot of each events source. No history: a past meeting has nothing left to do.
+CREATE TABLE IF NOT EXISTS appointments (
+    source_id      TEXT NOT NULL,
+    appointment_id TEXT NOT NULL,
+    data           TEXT NOT NULL,
+    PRIMARY KEY (source_id, appointment_id)
 );
 CREATE TABLE IF NOT EXISTS ignored (
     source_id TEXT NOT NULL,
@@ -211,7 +221,7 @@ class Store:
         state_columns = {row[1] for row in self._db.execute("PRAGMA table_info(source_state)")}
         if "warnings" not in state_columns:  # databases from before sync warnings
             self._db.execute("ALTER TABLE source_state ADD COLUMN warnings TEXT")
-        # source_memory is a new table, so SCHEMA's CREATE IF NOT EXISTS already added it.
+        # source_memory and appointments are new tables, so SCHEMA's CREATE IF NOT EXISTS already added them.
         if not had_history:  # databases from before the archive: start it from what is shown now
             with self._db:
                 self._db.execute(
@@ -307,6 +317,7 @@ class Store:
                 ("ignored", "source_id"),
                 ("item_history", "source_id"),
                 ("source_memory", "source_id"),
+                ("appointments", "source_id"),
             ):
                 self._db.execute(f"DELETE FROM {table} WHERE {column} = ?", (source_id,))
             self.secrets.delete_source(source_id)
@@ -398,6 +409,30 @@ class Store:
                 "INSERT INTO item_history (source_id, item_id, item, first_seen) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(source_id, item_id) DO UPDATE SET item = excluded.item",
                 [(source_id, i, json.dumps(item.to_dict()), first) for i, (item, first) in items.items()],
+            )
+            self._set_state(source_id, synced_at, None)
+            self._save_sync_extras(source_id, memory, warnings)
+
+    # -- appointments -----------------------------------------------------------
+
+    def appointments(self, source_id: str) -> list[Appointment]:
+        rows = self._db.execute("SELECT data FROM appointments WHERE source_id = ?", (source_id,))
+        return [Appointment.from_dict(json.loads(data)) for (data,) in rows]
+
+    def replace_appointments(
+        self,
+        source_id: str,
+        appointments: list[Appointment],
+        synced_at: float,
+        *,
+        memory: dict | None = None,
+        warnings: tuple[str, ...] = (),
+    ) -> None:
+        with self._db:
+            self._db.execute("DELETE FROM appointments WHERE source_id = ?", (source_id,))
+            self._db.executemany(
+                "INSERT OR REPLACE INTO appointments (source_id, appointment_id, data) VALUES (?, ?, ?)",
+                [(source_id, a.id, json.dumps(a.to_dict())) for a in appointments],
             )
             self._set_state(source_id, synced_at, None)
             self._save_sync_extras(source_id, memory, warnings)

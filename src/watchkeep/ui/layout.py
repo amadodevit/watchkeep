@@ -14,14 +14,14 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from rich.text import Text
 
 from watchkeep.core.checks import compact
 from watchkeep.core.engine import PluginInfo
 from watchkeep.core.health import FAILING
-from watchkeep.core.models import HealthView, SourceView, State
+from watchkeep.core.models import Appointment, HealthView, SourceView, State
 from watchkeep.core.panels import Panel, PanelFilter, is_all, panel_matches
 
 # (name shown on g, grouping levels outer to inner)
@@ -90,6 +90,8 @@ class _Ctx:
 
     def columns(self, source: SourceView) -> tuple[str, ...]:
         info = self.plugins.get(source.plugin)
+        if info is not None and info.kind == "events":
+            return ()  # the Agenda tab has the columns; the overview only counts
         if info is None or info.kind != "samples":
             return ITEM_COLUMNS
         return tuple((m.short or m.label.lower()) for m in info.metrics[:VALUE_COLUMNS])
@@ -143,6 +145,12 @@ def _source(rows: list[Row], source: SourceView, depth: int, ctx: _Ctx) -> None:
         rows.append(Row(key, cells, "source", source.id, health.key, health.url))
         return
 
+    info = ctx.plugins.get(source.plugin)
+    if info is not None and info.kind == "events":  # one line; the Agenda tab lists them
+        cells = [Text(f"{indent}  {source.name}", style="bold"), _appointment_counts(source, ctx), *[Text("")] * VALUE_COLUMNS, note]
+        rows.append(Row(key, cells, "source", source.id))
+        return
+
     expandable = bool(source.items or len(source.health) > 1)
     expanded = ctx.view.expanded.get(source.id, not source.health)  # items open, health folded
     arrow = ("▾ " if expanded else "▸ ") if expandable else "  "
@@ -175,6 +183,132 @@ def _source(rows: list[Row], source: SourceView, depth: int, ctx: _Ctx) -> None:
             values = [Text(_cut(item.repo, WIDTHS["value"][0])), Text(_cut(item.author, WIDTHS["value"][1])), Text(_ago(_iso(item.updated_at), ctx))]
             cells = [label, Text(_cut(item.title, ctx.view.title_width)), *_pad(values), Text("")]
             rows.append(Row(f"{source.id}\x1f{item.id}", cells, "item", source.id, item.id, item.url))
+
+
+# -- agenda --------------------------------------------------------------------
+
+AGENDA_COLUMNS = ("when", "length", "event", "with", "calendar")
+AGENDA_WIDTHS = {"when": 30, "length": 7, "with": 32, "calendar": 20}  # "event" takes the rest
+
+
+@dataclass(frozen=True)
+class AgendaRow:
+    """One appointment placed on the day it is listed under, with times as timestamps."""
+
+    appointment: Appointment
+    day: date
+    begins: float
+    ends: float
+    source_id: str = ""
+    source_name: str = ""
+
+    @property
+    def all_day(self) -> bool:
+        return self.appointment.all_day
+
+
+def agenda_rows(appointments: Iterable[Appointment], now: float, source_id: str = "", source_name: str = "") -> list[AgendaRow]:
+    """Appointments from today on, all-day ones first in each day, then by start time.
+
+    Something that started before today (a trip, a late meeting) is listed under today.
+    Anything already over before today is left out.
+    """
+    today = datetime.fromtimestamp(now).astimezone().date()
+    midnight = _midnight(today)
+    rows = []
+    for a in appointments:
+        try:
+            if a.all_day:
+                first, last = date.fromisoformat(a.start[:10]), date.fromisoformat(a.end[:10])
+                begins, ends = _midnight(first), _midnight(max(last, first + timedelta(days=1)))
+                day = first
+            else:
+                begins, ends = datetime.fromisoformat(a.start).timestamp(), datetime.fromisoformat(a.end).timestamp()
+                day = datetime.fromtimestamp(begins).astimezone().date()
+        except ValueError:
+            continue  # a plugin sent a date we can't read: skip it rather than break the tab
+        if ends <= midnight and begins < midnight:
+            continue
+        rows.append(AgendaRow(a, max(day, today), begins, ends, source_id, source_name))
+    return sorted(rows, key=lambda r: (r.day, not r.all_day, r.begins, r.appointment.title.lower()))
+
+
+def agenda(state: State, plugins: dict[str, PluginInfo], now: Callable[[], float] = time.time, title_width: int = 50) -> list[Row]:
+    """The Agenda tab: every events source merged, one header per day.
+
+    Over: dim and struck through. Happening now: bold, "now" in front.
+    """
+    moment = now()
+    sources = [s for s in state.sources if (info := plugins.get(s.plugin)) is not None and info.kind == "events"]
+    rows = sorted(
+        (r for s in sources for r in agenda_rows(s.appointments, moment, s.id, s.name)),
+        key=lambda r: (r.day, not r.all_day, r.begins, r.appointment.title.lower()),
+    )
+    today = datetime.fromtimestamp(moment).astimezone().date()
+    out: list[Row] = []
+    day = None
+    for r in rows:
+        if r.day != day:
+            day = r.day
+            out.append(Row(f"day:{day.isoformat()}", [Text(_day_name(day, today), style="bold reverse"), *[Text("")] * 4], "group"))
+        a = r.appointment
+        over, running = r.ends <= moment, not r.all_day and r.begins <= moment < r.ends
+        style = "dim strike" if over else "bold" if running else ""
+        when = _when_cell(r, running)
+        cells = [
+            Text(when, style="dim strike" if over else "bold green" if running else ""),
+            Text(_length(r), style="dim"),
+            Text(_cut(a.title, title_width), style=style),
+            Text(_cut(_people(a.attendees), AGENDA_WIDTHS["with"]), style="dim"),
+            Text(_cut(r.source_name, AGENDA_WIDTHS["calendar"]), style="dim"),
+        ]
+        out.append(Row(f"ap:{r.source_id}\x1f{a.id}", cells, "appointment", r.source_id, a.id, a.url))
+    return out
+
+
+def has_events(state: State, plugins: dict[str, PluginInfo]) -> bool:
+    """Whether the Agenda tab should show: at least one events source exists."""
+    return any((info := plugins.get(s.plugin)) is not None and info.kind == "events" for s in state.sources)
+
+
+def _midnight(day: date) -> float:
+    return datetime.combine(day, datetime.min.time()).astimezone().timestamp()
+
+
+def _clock(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def _day_name(day: date, today: date) -> str:
+    label = day.strftime("%a %d %b")
+    if day == today:
+        return f" Today · {label} "
+    if day == today + timedelta(days=1):
+        return f" Tomorrow · {label} "
+    return f" {label} "
+
+
+def _when_cell(r: AgendaRow, running: bool) -> str:
+    if r.all_day:
+        last = date.fromisoformat(r.appointment.end[:10]) - timedelta(days=1)
+        return "all day" if last <= r.day else f"all day · until {last.strftime('%d %b')}"
+    span = f"{_clock(r.begins)}–{_clock(r.ends)}" if r.ends > r.begins else _clock(r.begins)
+    return f"now · {span}" if running else span
+
+
+def _length(r: AgendaRow) -> str:
+    seconds = int(r.ends - r.begins)
+    if r.all_day:
+        days = round(seconds / 86400)
+        return f"{days}d" if days > 1 else ""
+    hours, minutes = divmod(seconds // 60, 60)
+    return " ".join(part for part in (f"{hours}h" if hours else "", f"{minutes}m" if minutes else "") if part)
+
+
+def _people(attendees: tuple[str, ...]) -> str:
+    if len(attendees) <= 2:
+        return ", ".join(attendees)
+    return f"{', '.join(attendees[:2])} +{len(attendees) - 2}"
 
 
 # -- panels --------------------------------------------------------------------
@@ -312,6 +446,17 @@ def _item_counts(source: SourceView) -> Text:
         text.append(f" · {source.ignored} ignored", style="dim")
     if source.read:
         text.append(f" · {source.read} read", style="dim")
+    return text
+
+
+def _appointment_counts(source: SourceView, ctx: _Ctx) -> Text:
+    """ "3 events today · next 14:00 Standup", so you can see the calendar is being read."""
+    today = datetime.fromtimestamp(ctx.now()).astimezone().date()
+    rows = [r for r in agenda_rows(source.appointments, ctx.now()) if r.day == today]
+    text = Text(f"{len(rows)} event{'s' if len(rows) != 1 else ''} today", style="" if rows else "dim")
+    upcoming = next((r for r in rows if not r.all_day and r.begins > ctx.now()), None)
+    if upcoming is not None:
+        text.append(f" · next {_clock(upcoming.begins)} {upcoming.appointment.title}", style="dim")
     return text
 
 

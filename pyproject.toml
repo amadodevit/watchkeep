@@ -21,10 +21,15 @@ github = "watchkeep.plugins.github:GitHubSource"
 website = "watchkeep.plugins.website:WebsiteSource"
 activemq = "watchkeep.plugins.activemq:ActiveMQSource"
 feeds = "watchkeep.plugins.feeds:FeedsSource"
+calendar = "watchkeep.plugins.calendar:CalendarSource"
 
 [project.optional-dependencies]
 feeds = [
     "anthropic>=2.3.0",
+]
+calendar = [
+    "icalendar>=7.3.0",
+    "recurring-ical-events>=3.8.2",
 ]
 
 [build-system]

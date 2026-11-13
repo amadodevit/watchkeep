@@ -54,9 +54,9 @@ You never write UI. Each `Setting` becomes one field in the add-source wizard.
 
 Values arrive as strings (or a list, for choices). Convert them in `sync`.
 
-## Items or samples
+## Items, samples or events
 
-Pick the kind that matches what you watch. Set `kind = "samples"` for the second one; items is the default.
+Pick the kind that matches what you watch. Set `kind = "samples"` or `kind = "events"`; items is the default.
 
 **Items** are things that need attention: a review request, an open alert.
 Return the full list each sync. The core compares it with the last one.
@@ -68,6 +68,15 @@ Return one `Sample(key, ok, summary, values, url)` per row each sync.
 You only say whether this one check passed. The core judges it over time with a rule
 (by default 5 failed of the last 10, then 3 good in a row to recover), and handles failing,
 acknowledge and close.
+
+**Events** are appointments with a time: meetings, deadlines. Return one
+`Appointment(id, title, start, end, all_day, description, attendees, url)` from
+`watchkeep.core.models` per occurrence in the window you show, each sync.
+`start` and `end` are ISO 8601: a datetime with its UTC offset, or a date
+(`"2026-11-13"`) when `all_day`, with `end` exclusive. Give each occurrence of a
+recurring meeting its own `id`. The core keeps the latest list and the Agenda tab
+shows every events source merged by day. No notification is raised when an
+appointment appears.
 
 ### Metrics and checks
 

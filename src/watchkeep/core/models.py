@@ -45,6 +45,35 @@ class Sample:
 
 
 @dataclass(frozen=True)
+class Appointment:
+    """One calendar entry an events source reports, e.g. a meeting today.
+
+    Named Appointment, not Event: `Event` is a notification (core/notify.py).
+    `id` must be unique per occurrence, so a weekly meeting gets one id per week.
+    `start` and `end` are ISO 8601: a datetime with its UTC offset, or a plain
+    date ("2026-11-13") when `all_day`, with `end` exclusive as in iCalendar.
+    """
+
+    id: str
+    title: str
+    start: str
+    end: str
+    all_day: bool = False
+    description: str = ""
+    attendees: tuple[str, ...] = ()
+    url: str = ""  # what Enter opens, if anything
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["attendees"] = list(self.attendees)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Appointment:
+        return cls(**{**data, "attendees": tuple(data.get("attendees", ()))})
+
+
+@dataclass(frozen=True)
 class HealthView:
     key: str
     state: str  # "ok" | "failing"
@@ -84,6 +113,7 @@ class SourceView:
     client: str = ""
     environment: str = ""
     warnings: tuple[str, ...] = ()  # partial failures from the last successful sync, not an error
+    appointments: tuple[Appointment, ...] = ()  # for events sources, as last reported
 
 
 @dataclass(frozen=True)

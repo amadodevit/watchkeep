@@ -395,3 +395,70 @@ def test_m_marks_an_item_read_and_the_archive_tab_flips_it_back():
     assert "PR 2" not in titles and "PR 1" in titles
     assert read["PR 1"] == "unread" and read["PR 2"] != "unread"
     assert [e.read_at for e in core.archive() if e.item.id == "2"] == [None]
+
+
+class AgendaPlugin:
+    name = "agenda"
+    connection = "http"
+    kind = "events"
+    settings = ()
+
+    def sync(self, ctx):
+        from datetime import datetime, timedelta
+
+        from watchkeep.core.models import Appointment
+
+        soon = datetime.now().astimezone() + timedelta(minutes=5)
+        later = soon + timedelta(minutes=30)
+        return [Appointment("m1", "Planning", soon.isoformat(), later.isoformat(), url="https://x/m1")]
+
+
+def test_agenda_tab_appears_with_an_events_source_and_goes_with_it():
+    core = quiet_core(items=ItemsPlugin(), agenda=AgendaPlugin())
+    core.add_source("items", "Work", {"account": "a"})
+
+    async def body(app, pilot):
+        before = tab_labels(app)
+        sid = core.add_source("agenda", "Calendar", {})
+        await core.sync_now(sid)
+        await pilot.pause(1.5)
+        with_agenda = tab_labels(app)
+        await pilot.press("tab")  # All -> Agenda
+        await pilot.pause(0.3)
+        table = app.query_one("#agenda", DataTable)
+        shown = (table.display, [str(table.get_row_at(r)[2]) for r in range(table.row_count)])
+        core.remove_source(sid)
+        await pilot.pause(1.5)
+        return before, with_agenda, shown, tab_labels(app), overview(app).display
+
+    before, with_agenda, shown, after, overview_back = start(core, body)
+    assert "Agenda" not in before
+    assert with_agenda[-3:] == ["Agenda", "Notifications", "Archive"]
+    assert shown == (True, ["", "Planning"])  # day header, then the meeting
+    assert "Agenda" not in after and overview_back  # removing the last calendar returns to All
+
+
+def test_capital_c_jumps_to_the_agenda_and_back():
+    core = quiet_core(items=ItemsPlugin(), agenda=AgendaPlugin())
+    core.add_source("items", "Work", {"account": "a"}, tags=("personal",))
+    three_panels(core)
+
+    async def body(app, pilot):
+        await pilot.press("C")  # no calendar yet
+        await pilot.pause(0.3)
+        without = app._active
+        sid = core.add_source("agenda", "Calendar", {})
+        await core.sync_now(sid)
+        await pilot.pause(1.5)
+        await pilot.press("3")
+        await pilot.pause(0.2)
+        seen = []
+        for _ in range(2):
+            await pilot.press("C")
+            await pilot.pause(0.3)
+            seen.append((app._active, app.query_one("#agenda", DataTable).display))
+        return without, seen
+
+    without, seen = start(core, body)
+    assert without == 0  # stayed on All, with a warning
+    assert seen == [(-3, True), (2, False)]  # to the Agenda, then back to panel 3

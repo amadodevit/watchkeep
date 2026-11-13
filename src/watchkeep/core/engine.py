@@ -23,7 +23,7 @@ from .config import DEFAULT_INTERVAL, SourceConfig
 from .connections import CONNECTIONS, resolve_secret
 from .diff import diff_snapshot
 from .health import FAILING, Health, Rule, step
-from .models import ArchiveEntry, HealthView, Item, ItemView, Sample, SourceView, State
+from .models import Appointment, ArchiveEntry, HealthView, Item, ItemView, Sample, SourceView, State
 from .notify import FAILING as FAILING_EVENT
 from .notify import NEW_ITEM, RECOVERED, DesktopChannel, Event
 from .panels import Panel
@@ -41,7 +41,7 @@ class PluginInfo:
     settings: tuple[Setting, ...]
     can_test: bool
     can_detect: bool
-    kind: str  # "items" (things that come and go) or "samples" (rows that are always there)
+    kind: str  # "items" (things that come and go), "samples" (rows that are always there) or "events" (appointments)
     default_interval: int
     default_rule: Rule | None  # only for "samples"
     metrics: tuple[Metric, ...] = ()
@@ -425,8 +425,11 @@ class Core:
             else:
                 if source_id not in self._sources:
                     return None  # removed while syncing
-                if _kind(self._plugins[source.plugin]) == "samples":
+                kind = _kind(self._plugins[source.plugin])
+                if kind == "samples":
                     events = self._apply_samples(source, items, memory, warnings)
+                elif kind == "events":
+                    events = self._apply_appointments(source, items, memory, warnings)
                 else:
                     events = self._apply(source, items, memory, warnings, quiet)
             finally:
@@ -444,6 +447,9 @@ class Core:
             settings = self._resolve(source.plugin, settings)
             ctx = SyncContext(settings=settings, http=conn, memory=memory)
             result = plugin.sync(ctx)
+        result = list(result)  # a generator would be used up by the checks below
+        if _kind(plugin) == "events":
+            _check_appointments(result)  # here, so a bad plugin's error lands on its own source
         try:
             json.dumps(ctx.memory)
         except (TypeError, ValueError):
@@ -497,6 +503,14 @@ class Core:
                 note = " · press c to close" if h.acknowledged else ""
                 events.append(self._event(RECOVERED, source, title=f"✓ {source.name} recovered", body=body + note, url=latest[key].url))
         return events
+
+    def _apply_appointments(
+        self, source: SourceConfig, appointments: list[Appointment], memory: dict, warnings: tuple[str, ...]
+    ) -> list[Event]:
+        """Keep the latest snapshot. No events: a meeting showing up in the calendar isn't news."""
+        unique = list({a.id: a for a in appointments}.values())  # one row per id, the last one wins
+        self._store.replace_appointments(source.id, unique, self._clock(), memory=memory, warnings=warnings)
+        return []
 
     def _judge(self, source: SourceConfig, sample: Sample, previous: dict | None) -> Sample:
         """Add counter growth to the summary, then apply the source's checks: any that fires
@@ -661,9 +675,22 @@ class Core:
                     read=len(read & snapshot.keys()),
                     client=source.client,
                     environment=source.environment,
+                    appointments=tuple(self._store.appointments(source.id)) if _kind(plugin) == "events" else (),
                 )
             )
         return State(version=self._version, sources=tuple(views))
+
+
+def _check_appointments(result: list) -> None:
+    for a in result:
+        if not isinstance(a, Appointment):
+            raise RuntimeError("an events plugin must return Appointment objects")
+        if not (isinstance(a.start, str) and isinstance(a.end, str)):
+            raise RuntimeError(f"appointment {a.id!r}: start and end must be ISO 8601 strings")
+        try:
+            json.dumps(a.to_dict())
+        except (TypeError, ValueError):
+            raise RuntimeError(f"appointment {a.id!r} is not plain data (strings, a tuple of strings)") from None
 
 
 def _kind(plugin: SourcePlugin) -> str:
