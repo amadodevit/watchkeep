@@ -36,7 +36,9 @@ ActiveMQ, `Fetch` lists the broker's queues so you can choose. Passwords go to y
 
 **Shows your day.** The Agenda tab lists today's meetings from every calendar you add, Google
 and Outlook mixed, all-day events first. What's over is struck through, what's on now is marked,
-and Enter on a meeting opens its video call. Press `C` to jump there and back.
+and Enter on a meeting opens its video call. Press `C` to jump there and back. On the Agenda,
+`d`, `x` and `w` show today, the next 3 days or the next 7, like Google Calendar; free days say
+so. The choice is remembered.
 
 **Grows with plugins.** Each source type is a small Python plugin. Write your own for anything
 that has an API (see [Writing a plugin](#writing-a-plugin)).
@@ -54,7 +56,7 @@ the feeds source uses; `calendar` adds the iCal parser the calendar source uses.
 ## Run it
 
 ```sh
-watchkeep         # a add · e edit · g group · -/+ fold/unfold a level · d delete · Enter open/fold · r sync · i ignore · m mark read · k acknowledge · c close · p panels · C agenda · q quit
+watchkeep         # a add · e edit · g group · -/+ fold/unfold a level · d delete (on the Agenda: d/x/w day, 3 days, week) · Enter open/fold · r sync · i ignore · m mark read · k acknowledge · c close · p panels · C agenda · q quit
 watchkeep check   # test each source's connection
 ```
 
@@ -112,7 +114,7 @@ Values in one field are "any of"; different fields must all match, so client `ac
   panel you aren't looking at still shows.
 - A new source tagged `personal` turns up in a "Personal" panel by itself, no editing needed.
 - **All** is always first and can't be deleted. Deleting a panel never deletes a source.
-- **Agenda** shows while you have a calendar source: today's meetings from all of them, by day.
+- **Agenda** shows while you have a calendar source: meetings from all of them, by day, for today, 3 days or a week (`d`/`x`/`w`).
   `C` jumps there and back.
 - **Notifications** lists this session's events, newest first. Enter opens one.
   Toasts and popups still fire for every source, whichever panel is open.

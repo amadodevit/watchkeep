@@ -4,7 +4,7 @@ Changes to the plugin contract are marked **Plugins**.
 
 ## 0.1.0 (unreleased)
 
-- Calendar source (`pip install 'watchkeep[calendar]'`): today's appointments, or the next few days, from a secret iCal address (Google Calendar gives one per calendar). Recurring meetings are expanded, cancelled ones dropped. An Agenda tab lists them by day, all-day first; what is over is struck through and what is happening now is marked. The tab shows only while a calendar source exists.
+- Calendar source (`pip install 'watchkeep[calendar]'`): the next 31 days of appointments from a secret iCal address (Google Calendar gives one per calendar). Recurring meetings are expanded, cancelled ones dropped. An Agenda tab lists them by day, all-day first; what is over is struck through and what is happening now is marked. The tab shows only while a calendar source exists. On the Agenda, `d`, `x` and `w` show today, 3 days or a week from today (remembered); every day gets a header and free days read "nothing on". The source no longer has a "Days to show" setting; a stored one is ignored.
 - **Plugins:** a third kind, `kind = "events"`, returning `Appointment` objects. Additive: items and samples plugins need no change.
 
 - Renamed from fly-monitor to watchkeep: package, `watchkeep` command, data in `~/.local/share/watchkeep`, keyring service `watchkeep`.

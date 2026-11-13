@@ -188,6 +188,7 @@ def _source(rows: list[Row], source: SourceView, depth: int, ctx: _Ctx) -> None:
 # -- agenda --------------------------------------------------------------------
 
 AGENDA_COLUMNS = ("when", "length", "event", "with", "calendar")
+AGENDA_VIEWS = {1: "today", 3: "3 days", 7: "week"}  # days shown -> tab label; keys d, x, w
 AGENDA_WIDTHS = {"when": 30, "length": 7, "with": 32, "calendar": 20}  # "event" takes the rest
 
 
@@ -233,37 +234,45 @@ def agenda_rows(appointments: Iterable[Appointment], now: float, source_id: str 
     return sorted(rows, key=lambda r: (r.day, not r.all_day, r.begins, r.appointment.title.lower()))
 
 
-def agenda(state: State, plugins: dict[str, PluginInfo], now: Callable[[], float] = time.time, title_width: int = 50) -> list[Row]:
-    """The Agenda tab: every events source merged, one header per day.
+def agenda(
+    state: State, plugins: dict[str, PluginInfo], now: Callable[[], float] = time.time, title_width: int = 50, days: int = 1
+) -> list[Row]:
+    """The Agenda tab: every events source merged, one header per day, `days` days from today.
 
-    Over: dim and struck through. Happening now: bold, "now" in front.
+    Every day in the view gets a header, so a free day reads "nothing on" instead of
+    just being missing. Over: dim and struck through. Happening now: bold, "now" in front.
     """
     moment = now()
-    sources = [s for s in state.sources if (info := plugins.get(s.plugin)) is not None and info.kind == "events"]
-    rows = sorted(
-        (r for s in sources for r in agenda_rows(s.appointments, moment, s.id, s.name)),
-        key=lambda r: (r.day, not r.all_day, r.begins, r.appointment.title.lower()),
-    )
     today = datetime.fromtimestamp(moment).astimezone().date()
+    last = today + timedelta(days=max(1, days))
+    sources = [s for s in state.sources if (info := plugins.get(s.plugin)) is not None and info.kind == "events"]
+    by_day: dict[date, list[AgendaRow]] = {today + timedelta(days=n): [] for n in range((last - today).days)}
+    for s in sources:
+        for r in agenda_rows(s.appointments, moment, s.id, s.name):
+            if r.day < last:
+                by_day[r.day].append(r)
     out: list[Row] = []
-    day = None
-    for r in rows:
-        if r.day != day:
-            day = r.day
-            out.append(Row(f"day:{day.isoformat()}", [Text(_day_name(day, today), style="bold reverse"), *[Text("")] * 4], "group"))
-        a = r.appointment
-        over, running = r.ends <= moment, not r.all_day and r.begins <= moment < r.ends
-        style = "dim strike" if over else "bold" if running else ""
-        when = _when_cell(r, running)
-        cells = [
-            Text(when, style="dim strike" if over else "bold green" if running else ""),
-            Text(_length(r), style="dim"),
-            Text(_cut(a.title, title_width), style=style),
-            Text(_cut(_people(a.attendees), AGENDA_WIDTHS["with"]), style="dim"),
-            Text(_cut(r.source_name, AGENDA_WIDTHS["calendar"]), style="dim"),
-        ]
-        out.append(Row(f"ap:{r.source_id}\x1f{a.id}", cells, "appointment", r.source_id, a.id, a.url))
+    for day, rows in by_day.items():
+        out.append(Row(f"day:{day.isoformat()}", [Text(_day_name(day, today), style="bold reverse"), *[Text("")] * 4], "group"))
+        if not rows:
+            out.append(Row(f"empty:{day.isoformat()}", [Text(""), Text(""), Text("nothing on", style="dim"), Text(""), Text("")], "empty"))
+        for r in sorted(rows, key=lambda r: (not r.all_day, r.begins, r.appointment.title.lower())):
+            out.append(_appointment_row(r, moment, title_width))
     return out
+
+
+def _appointment_row(r: AgendaRow, moment: float, title_width: int) -> Row:
+    a = r.appointment
+    over, running = r.ends <= moment, not r.all_day and r.begins <= moment < r.ends
+    style = "dim strike" if over else "bold" if running else ""
+    cells = [
+        Text(_when_cell(r, running), style="dim strike" if over else "bold green" if running else ""),
+        Text(_length(r), style="dim"),
+        Text(_cut(a.title, title_width), style=style),
+        Text(_cut(_people(a.attendees), AGENDA_WIDTHS["with"]), style="dim"),
+        Text(_cut(r.source_name, AGENDA_WIDTHS["calendar"]), style="dim"),
+    ]
+    return Row(f"ap:{r.source_id}\x1f{a.id}", cells, "appointment", r.source_id, a.id, a.url)
 
 
 def has_events(state: State, plugins: dict[str, PluginInfo]) -> bool:

@@ -433,7 +433,7 @@ def test_agenda_tab_appears_with_an_events_source_and_goes_with_it():
 
     before, with_agenda, shown, after, overview_back = start(core, body)
     assert "Agenda" not in before
-    assert with_agenda[-3:] == ["Agenda", "Notifications", "Archive"]
+    assert with_agenda[-3:] == ["Agenda · today", "Notifications", "Archive"]
     assert shown == (True, ["", "Planning"])  # day header, then the meeting
     assert "Agenda" not in after and overview_back  # removing the last calendar returns to All
 
@@ -462,3 +462,35 @@ def test_capital_c_jumps_to_the_agenda_and_back():
     without, seen = start(core, body)
     assert without == 0  # stayed on All, with a warning
     assert seen == [(-3, True), (2, False)]  # to the Agenda, then back to panel 3
+
+
+def test_d_x_w_pick_the_agenda_days_and_d_still_deletes_elsewhere():
+    core = quiet_core(items=ItemsPlugin(), agenda=AgendaPlugin())
+    core.add_source("items", "Work", {"account": "a"})
+    sid = core.add_source("agenda", "Calendar", {})
+
+    async def body(app, pilot):
+        await core.sync_now(sid)
+        await pilot.pause(1.5)
+        await pilot.press("C")
+        await pilot.pause(0.3)
+        table = app.query_one("#agenda", DataTable)
+        seen = []
+        for key in ("w", "x", "d"):
+            await pilot.press(key)
+            await pilot.pause(0.2)
+            headers = sum(1 for r in range(table.row_count) if str(table.get_row_at(r)[2]) in ("", "nothing on") and str(table.get_row_at(r)[0]).strip())
+            seen.append((tab_labels(app)[-3], headers, len(app.screen_stack)))
+        await pilot.press("x")
+        await pilot.press("C")  # back to All
+        await pilot.pause(0.3)
+        deleted = []
+        app.action_delete = lambda: deleted.append(app._active)
+        await pilot.press("d")
+        await pilot.pause(0.3)
+        return seen, deleted
+
+    seen, asked = start(core, body)
+    assert seen == [("Agenda · week", 7, 1), ("Agenda · 3 days", 3, 1), ("Agenda · today", 1, 1)]  # no delete prompt
+    assert asked == [0]  # outside the Agenda, d is still delete (which asks first)
+    assert core.preference("agenda_days") == "3"  # remembered for the next start

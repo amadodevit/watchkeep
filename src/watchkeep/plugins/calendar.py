@@ -1,4 +1,4 @@
-"""Calendar source: your appointments for today (or the next few days) from an iCal address.
+"""Calendar source: your appointments for the next 31 days from an iCal address.
 
 Reads the secret iCal address a calendar service gives out (Google Calendar:
 Settings › your calendar › "Secret address in iCal format"). That address is a
@@ -7,8 +7,11 @@ shown in an error message.
 
 Each sync returns every occurrence in the window, recurring meetings expanded
 one per day, cancelled ones dropped. The window starts at local midnight today
-and covers `days` days. Nothing here raises a notification: the core keeps the
-snapshot for the Agenda tab.
+and always covers FETCH_DAYS days: the address returns the whole calendar
+anyway, so a wide window costs only local parsing, and the Agenda tab picks how
+many of those days to show. A `days` setting stored by older versions is
+ignored. Nothing here raises a notification: the core keeps the snapshot for
+the Agenda tab.
 
 `icalendar` and `recurring-ical-events` are imported inside the functions that
 use them, so installing watchkeep without the `calendar` extra still works.
@@ -26,7 +29,7 @@ import httpx
 from watchkeep.core.models import Appointment
 from watchkeep.core.plugin import Setting, SyncContext
 
-MAX_DAYS = 31
+FETCH_DAYS = 31  # the Agenda shows at most 7 of these; the rest is headroom
 DESCRIPTION_CHARS = 2000
 MAX_ATTENDEES = 50
 LINK = re.compile(r"https?://[^\s<>\"']+")
@@ -50,27 +53,14 @@ class CalendarSource:
             secret=True,
             help="Google Calendar: Settings › your calendar › Secret address in iCal format",
         ),
-        Setting("days", "Days to show", required=False, default="1", help="1 = today only"),
     )
 
     def sync(self, ctx: SyncContext) -> list[Appointment]:
-        return appointments(fetch(ctx), days=parse_days(ctx.settings.get("days", "1")))
+        return appointments(fetch(ctx), days=FETCH_DAYS)
 
     def test_connection(self, ctx: SyncContext) -> str:
-        days = parse_days(ctx.settings.get("days", "1"))
-        found = appointments(fetch(ctx), days=days)
-        when = "today" if days == 1 else f"in the next {days} days"
-        return f"{len(found)} event{'s' if len(found) != 1 else ''} {when}"
-
-
-def parse_days(value: Any) -> int:
-    try:
-        days = int(str(value).strip())
-    except ValueError:
-        raise ValueError(f"days to show must be a whole number, got {value!r}") from None
-    if not 1 <= days <= MAX_DAYS:
-        raise ValueError(f"days to show must be between 1 and {MAX_DAYS}")
-    return days
+        found = appointments(fetch(ctx), days=FETCH_DAYS)
+        return f"{len(found)} event{'s' if len(found) != 1 else ''} in the next {FETCH_DAYS} days"
 
 
 def fetch(ctx: SyncContext) -> str:

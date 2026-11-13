@@ -10,7 +10,7 @@ import pytest
 from watchkeep.core.engine import Core
 from watchkeep.core.models import Appointment, State
 from watchkeep.core.store import Store
-from watchkeep.plugins.calendar import CalendarSource, appointments, fetch, parse_days
+from watchkeep.plugins.calendar import FETCH_DAYS, CalendarSource, appointments, fetch
 from watchkeep.ui import layout
 
 ICS = (Path(__file__).parent / "fixtures" / "calendar.ics").read_text()
@@ -71,13 +71,6 @@ def test_occurrences_of_a_recurring_meeting_get_distinct_ids():
     assert len(found) == 5 and len({a.id for a in found}) == 5  # 16, 23, 30 Nov, 7, 14 Dec
 
 
-def test_parse_days_rejects_nonsense():
-    assert parse_days("3") == 3
-    for bad in ("0", "x", "99"):
-        with pytest.raises(ValueError):
-            parse_days(bad)
-
-
 class FakeHttp:
     def __init__(self, text="", status=200):
         self.text, self.status = text, status
@@ -96,7 +89,7 @@ SECRET = "https://calendar.example.com/ical/someone%40example.com/private-012345
 def ctx(http):
     from watchkeep.core.plugin import SyncContext
 
-    return SyncContext(settings={"url": SECRET, "days": "1"}, http=http)
+    return SyncContext(settings={"url": SECRET, "days": "1"}, http=http)  # "days": stored by older versions
 
 
 def test_fetch_errors_never_show_the_secret_address():
@@ -106,8 +99,12 @@ def test_fetch_errors_never_show_the_secret_address():
         assert "private" not in str(exc.value) and "example.com" not in str(exc.value)
 
 
-def test_test_connection_counts_todays_events():
-    assert CalendarSource().test_connection(ctx(FakeHttp(text=ICS))).endswith("today")
+def test_sync_always_covers_31_days_and_ignores_an_old_days_setting():
+    assert FETCH_DAYS == 31 and not any(s.key == "days" for s in CalendarSource.settings)
+    found = CalendarSource().sync(ctx(FakeHttp(text=ICS)))
+    later = [a for a in found if a.start[:10] > datetime.now().date().isoformat()]
+    assert later or not found  # fixture dates may all be past on the machine's clock: then nothing at all
+    assert CalendarSource().test_connection(ctx(FakeHttp(text=ICS))).endswith("in the next 31 days")
 
 
 # -- core ----------------------------------------------------------------------
@@ -208,6 +205,24 @@ def test_agenda_lists_earlier_days_under_today_and_drops_yesterday():
     rows = layout.agenda(state_with([trip, late, gone]), plugins(), now=lambda: at(8))
     assert [r.cells[2].plain for r in rows if r.kind == "appointment"] == ["Trip", "late"]
     assert all(r.cells[0].plain.startswith(" Today") for r in rows if r.kind == "group")
+
+
+def test_agenda_shows_the_chosen_days_with_a_header_for_each():
+    found = appointments(ICS, days=31, now=MONDAY_8AM)
+    week = layout.agenda(state_with(found), plugins(), now=lambda: at(8), days=7)
+    headers = [r.cells[0].plain.strip() for r in week if r.kind == "group"]
+    assert len(headers) == 7 and headers[0].startswith("Today") and headers[1].startswith("Tomorrow")
+    assert headers[-1] == "Sun 22 Nov"  # rolling from today, not Mon-Sun
+    assert "Planning" in [r.cells[2].plain for r in week]  # Friday
+    three = layout.agenda(state_with(found), plugins(), now=lambda: at(8), days=3)
+    assert "Planning" not in [r.cells[2].plain for r in three]
+    assert sum(r.kind == "group" for r in three) == 3
+
+
+def test_agenda_marks_a_free_day():
+    rows = layout.agenda(state_with([]), plugins(), now=lambda: at(8), days=3)
+    assert [r.kind for r in rows] == ["group", "empty"] * 3
+    assert rows[1].cells[2].plain == "nothing on"
 
 
 def test_overview_row_counts_today_and_names_the_next_one():

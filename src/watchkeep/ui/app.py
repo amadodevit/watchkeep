@@ -54,6 +54,10 @@ class WatchkeepApp(App):
         ("minus", "fold_level", "Fold level"),
         ("plus", "unfold_level", "Unfold level"),
         Binding("equals_sign", "unfold_level", "Unfold level", show=False),  # + without shift
+        # d/x/w pick the Agenda's days like Google Calendar; outside the Agenda d deletes.
+        Binding("d", "agenda_view(1)", "Day"),
+        Binding("x", "agenda_view(3)", "3 days"),
+        Binding("w", "agenda_view(7)", "Week"),
         ("d", "delete", "Delete source"),
         ("i", "ignore", "Ignore"),
         ("m", "mark_read", "Read"),
@@ -76,6 +80,8 @@ class WatchkeepApp(App):
         self._agenda_urls: dict[str, str] = {}
         self._before_agenda = 0  # where C goes back to
         self._has_agenda = layout.has_events(core.get_state(), self._plugin_infos())
+        saved = core.preference("agenda_days") or "1"
+        self._agenda_days = int(saved) if saved in {str(n) for n in layout.AGENDA_VIEWS} else 1
         self._panels: list[Panel] = core.panels()
         active = core.active_panel()
         self._active = next((i for i, p in enumerate(self._panels) if p.id == active), 0)  # index, or a FIXED key
@@ -201,8 +207,11 @@ class WatchkeepApp(App):
 
     def _tabs(self, state: State | None = None) -> list[Tab]:
         tabs = [Tab(self._tab_label(i, p, state), id=self._tab_id(i)) for i, p in enumerate(self._panels)]
-        names = {-3: "Agenda", -1: "Notifications", -2: "Archive"}
+        names = {-3: self._agenda_label(), -1: "Notifications", -2: "Archive"}
         return [*tabs, *(Tab(names[i], id=FIXED[i]) for i in self._order() if i < 0)]
+
+    def _agenda_label(self) -> str:
+        return f"Agenda · {layout.AGENDA_VIEWS[self._agenda_days]}"
 
     def _tab_label(self, index: int, panel: Panel, state: State | None) -> Text:
         label = Text(f"{index + 1} {panel.name}" if index < 9 else panel.name)
@@ -238,6 +247,7 @@ class WatchkeepApp(App):
             self._view.folded_groups.clear()  # group keys belong to the panel they were folded in
             self._view.expanded = {}
         self.query_one(Tabs).active = self._tab_id(index)
+        self.refresh_bindings()  # the footer shows Day/3 days/Week only on the Agenda
         self._show_active()
         self._redraw()
 
@@ -252,6 +262,10 @@ class WatchkeepApp(App):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action in ("next_panel", "previous_panel", "panel", "panel_from_group", "panels", "calendar"):
             return len(self.screen_stack) == 1  # in a form, Tab moves between fields and keys type
+        if action == "agenda_view":
+            return len(self.screen_stack) == 1 and self._active == -3
+        if action == "delete":
+            return self._active != -3  # on the Agenda, d is the day view
         return True
 
     def action_panel(self, index: int) -> None:
@@ -272,6 +286,16 @@ class WatchkeepApp(App):
             return
         self._before_agenda = self._active
         self._switch(-3)
+
+    def action_agenda_view(self, days: int) -> None:
+        """d, x, w on the Agenda: show today, 3 days or a week from today. Remembered."""
+        self._agenda_days = days
+        self.core.set_preference("agenda_days", str(days))
+        try:
+            self.query_one(f"#{AGENDA}", Tab).label = self._agenda_label()
+        except Exception:
+            pass  # tab is being rebuilt
+        self._draw_agenda(self.core.get_state())
 
     def action_next_panel(self) -> None:
         self._step(1)
@@ -345,10 +369,9 @@ class WatchkeepApp(App):
         selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value if table.row_count else None
         table.clear()
         fixed = sum(layout.AGENDA_WIDTHS.values()) + 2 * len(layout.AGENDA_COLUMNS)
-        rows = layout.agenda(state, self._plugin_infos(), title_width=max(20, self.size.width - fixed))
+        width = max(20, self.size.width - fixed)
+        rows = layout.agenda(state, self._plugin_infos(), title_width=width, days=self._agenda_days)
         self._agenda_urls = {r.key: r.url for r in rows if r.url}
-        if not rows:
-            table.add_row(Text(" nothing on ", style="reverse"), "", Text("no appointments left today", style="dim"), "", "", key="none")
         for row in rows:
             table.add_row(*row.cells, key=row.key)
         if selected is not None:
