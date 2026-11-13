@@ -1,8 +1,8 @@
 # watchkeep
 
 One terminal view of the things you'd otherwise check in five browser tabs: GitHub review
-requests and mentions, website uptime, ActiveMQ Classic queues, and blog posts a Claude model
-picks out for you from your RSS/Atom feeds.
+requests and mentions, website uptime, ActiveMQ Classic queues, blog posts a Claude model
+picks out for you from your RSS/Atom feeds, and today's meetings from your calendars.
 
 It stays quiet while everything is fine. When something needs you, it goes red, moves to the
 top, and pops up a desktop notification.
@@ -34,16 +34,31 @@ ActiveMQ, `Fetch` lists the broker's queues so you can choose. Passwords go to y
 
 ![Add-source form for an ActiveMQ broker](docs/screenshots/add-source.png)
 
+**Shows your day.** The Agenda tab lists today's meetings from every calendar you add, Google
+and Outlook mixed, all-day events first. What's over is struck through, what's on now is marked,
+and Enter on a meeting opens its video call. Press `C` to jump there and back.
+
 **Grows with plugins.** Each source type is a small Python plugin. Write your own for anything
 that has an API (see [Writing a plugin](#writing-a-plugin)).
+
+## Install
+
+```sh
+pip install watchkeep                     # or: uv tool install watchkeep
+pip install 'watchkeep[feeds,calendar]'   # add the extras for the sources you want
+```
+
+The GitHub, website and ActiveMQ sources need nothing more. `feeds` adds the Anthropic client
+the feeds source uses; `calendar` adds the iCal parser the calendar source uses.
 
 ## Run it
 
 ```sh
-uv run watchkeep         # a add · e edit · g group · -/+ fold/unfold a level · d delete · Enter open/fold · r sync · i ignore · m mark read · k acknowledge · c close · p panels · q quit
-uv run watchkeep check   # test each source's connection
-uv run pytest
+watchkeep         # a add · e edit · g group · -/+ fold/unfold a level · d delete · Enter open/fold · r sync · i ignore · m mark read · k acknowledge · c close · p panels · C agenda · q quit
+watchkeep check   # test each source's connection
 ```
+
+From a clone, prefix each with `uv run`, and run the tests with `uv run pytest`.
 
 ## How it works
 
@@ -61,8 +76,18 @@ An ActiveMQ queue has a bad check when one of its checks fires: no consumers, st
 but none dequeued since the last sync) or a backlog. You can untick them and change the numbers when
 adding the broker. By default a queue is failing after 3 bad checks in a row, synced every minute.
 
+A feed's new posts go to a Claude model, together with the interests you write, in one call per
+sync (every 12 hours by default, `claude-haiku-5-5`). That needs an Anthropic API key, separate
+from a Claude subscription, and each call is billed to it. Posts are never judged twice, and
+without a key the source shows an error instead of retrying.
+
+A calendar is read from its secret iCal address: in Google Calendar, Settings › your calendar ›
+"Secret address in iCal format"; in Outlook on the web, Settings › Calendar › Shared calendars ›
+Publish a calendar, then the ICS link. That address is a password, so it goes to the keyring like
+one. It is synced every 15 minutes; add one source per calendar and the Agenda merges them.
+
 New GitHub items, and websites or queues going failing or recovering, raise a desktop popup (notify-send) and an in-app toast,
-while watchkeep is open. A source's first sync stays quiet. A source's header turns red while one of its
+while watchkeep is open. A source's first sync stays quiet. Calendar events raise none. A source's header turns red while one of its
 rows is failing, even when folded, and failing rows are listed first.
 
 Give each source a client and an environment (`e` to edit). The overview groups by client, then kind;
@@ -87,6 +112,8 @@ Values in one field are "any of"; different fields must all match, so client `ac
   panel you aren't looking at still shows.
 - A new source tagged `personal` turns up in a "Personal" panel by itself, no editing needed.
 - **All** is always first and can't be deleted. Deleting a panel never deletes a source.
+- **Agenda** shows while you have a calendar source: today's meetings from all of them, by day.
+  `C` jumps there and back.
 - **Notifications** lists this session's events, newest first. Enter opens one.
   Toasts and popups still fire for every source, whichever panel is open.
 - **Archive**, the last tab, keeps every item (GitHub items, feed posts) with when it arrived and
