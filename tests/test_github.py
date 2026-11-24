@@ -78,7 +78,7 @@ def sync_with(watch):
 def test_watch_reviews_only_skips_notifications():
     items, calls = sync_with(["review_requests"])
     assert {i.action for i in items} == {"review requested"}
-    assert calls == ["https://api.github.com/search/issues"]
+    assert calls == ["https://api.github.com/search/issues"] * 2  # to you by name, then also to your teams
 
 
 def test_watch_mentions_only_skips_search_and_comments():
@@ -251,17 +251,19 @@ class SearchHttp:
 
 def test_my_prs_are_off_for_sources_from_before_watch_had_them():
     _, calls = sync_with(["review_requests", "comments", "mentions"])
-    assert calls.count("https://api.github.com/search/issues") == 1
+    assert calls.count("https://api.github.com/search/issues") == 2  # the review searches only
     assert next(s for s in GitHubSource.settings if s.key == "watch").choices[3].value == "mine"
 
 
-def _node(n, *, decision=None, checks="SUCCESS", latest=(), reviews=(), comments=()):
+def _node(n, *, decision=None, checks="SUCCESS", latest=(), reviews=(), comments=(), mergeable="MERGEABLE", merge_state="BLOCKED"):
     person = lambda login: {"__typename": "Bot" if login.endswith("[bot]") else "User", "login": login}
     return {
         "url": f"https://github.com/acme/widgets/pull/{n}",
         "title": f" PR {n} ",
         "updatedAt": "2026-01-01T00:00:00Z",
         "reviewDecision": decision,
+        "mergeable": mergeable,
+        "mergeStateStatus": merge_state,
         "repository": {"nameWithOwner": "acme/widgets"},
         "latestReviews": {"nodes": [{"state": st, "submittedAt": t, "author": person(who)} for who, st, t in latest]},
         "reviews": {"nodes": [{"state": st, "submittedAt": t, "author": person(who)} for who, st, t in reviews]},
@@ -372,3 +374,45 @@ def test_without_my_prs_author_notifications_stay_hidden():
     http = NotifHttp([_thread("author", 1), _thread("comment", 2)], {1: ("me", "open"), 2: ("me", "open")}, {})
     items = GitHubSource().sync(SyncContext(settings={"account": "me", "token": "t", "watch": ["comments"]}, http=http))
     assert [(i.action, i.url) for i in items] == [("commented", "https://github.com/acme/widgets/pull/2")]
+
+
+def test_conflicts_and_stale_branches_come_before_reviews():
+    items, _, _ = mine(
+        _node(1, checks="FAILURE", mergeable="CONFLICTING"),
+        _node(2, decision="APPROVED", latest=[("ana", "APPROVED", "t1")], mergeable="CONFLICTING"),
+        _node(3, decision="CHANGES_REQUESTED", latest=[("bob", "CHANGES_REQUESTED", "t1")], merge_state="BEHIND"),
+        _node(4, decision="APPROVED", latest=[("ana", "APPROVED", "t1")], merge_state="BEHIND"),
+        _node(5, mergeable="UNKNOWN", merge_state="UNKNOWN"),  # GitHub still computing: no verdict
+    )
+    assert [i.action for i in items] == ["checks failing", "merge conflict", "changes requested", "behind base", "waiting for review"]
+
+
+class ReviewHttp:
+    def __init__(self, direct, everyone):
+        self.answers = {"user-review-requested:@me": direct, "review-requested:@me": everyone}
+
+    def get_json(self, url, *, headers=None, params=None):
+        q = params["q"]
+        key = "user-review-requested:@me" if "user-review-requested:@me" in q else "review-requested:@me"
+        return {"items": self.answers[key]}
+
+
+def _search_pr(n):
+    return {
+        "html_url": f"https://github.com/acme/widgets/pull/{n}",
+        "title": f"PR {n}",
+        "repository_url": "https://api.github.com/repos/acme/widgets",
+        "user": {"login": "ana"},
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+
+
+def test_team_review_requests_are_apart_and_quiet():
+    http = ReviewHttp([_search_pr(1)], [_search_pr(1), _search_pr(2)])
+    ctx = SyncContext(settings={"account": "me", "token": "t", "watch": ["review_requests"]}, http=http)
+    items = GitHubSource().sync(ctx)
+    assert [(i.id, i.action) for i in items] == [
+        ("review:https://github.com/acme/widgets/pull/1", "review requested"),
+        ("team-review:https://github.com/acme/widgets/pull/2", "team review requested"),
+    ]
+    assert ctx.quiet == {"team-review:https://github.com/acme/widgets/pull/2"}

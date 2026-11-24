@@ -1,4 +1,4 @@
-"""GitHub source: open review requests, unread comments and mentions, PRs nobody was asked to review,
+"""GitHub source: open review requests (to you by name, or to a team you're in), unread comments and mentions, PRs nobody was asked to review,
 and the account's own PRs that are waiting on it.
 
 Review requests come from search (a true snapshot: once you review, the PR drops
@@ -16,8 +16,8 @@ often the forgotten ones. Only PRs opened later notify.
 
 "My PRs" lists every open, non-draft PR of the account, one row each, from a
 single GraphQL query (search plus reviews, last comments and the checks rollup).
-The row's action is its most pressing state: checks failing, changes requested,
-approved, partly approved (approvals, but the repo wants more), commented (someone
+The row's action is its most pressing state: checks failing, merge conflict,
+changes requested, behind base (the repo requires branches up to date), approved, partly approved (approvals, but the repo wants more), commented (someone
 else reviewed or commented), or waiting for review (nobody has yet). `author` is
 who put it there: the reviewer, or the last person to comment or review. Bots
 don't count as interaction. The state is part of the id, so a PR moving from
@@ -44,7 +44,8 @@ from watchkeep.core.models import Item
 from watchkeep.core.plugin import Candidate, Choice, Setting, SyncContext
 
 API = "https://api.github.com"
-REVIEW_QUERY = "is:pr is:open review-requested:@me archived:false"
+REVIEW_QUERY = "is:pr is:open review-requested:@me archived:false"  # you, or a team you're in
+DIRECT_REVIEW_QUERY = "is:pr is:open user-review-requested:@me archived:false"  # you by name
 NOTIFICATION_ACTIONS = {"comment": "commented", "mention": "mentioned", "team_mention": "mentioned"}
 # notification reason -> the "watch" choice that enables it
 REASON_WATCH = {"comment": "comments", "mention": "mentions", "team_mention": "mentions"}
@@ -55,7 +56,7 @@ query($q: String!) {
   search(query: $q, type: ISSUE, first: 50) {
     nodes {
       ... on PullRequest {
-        url title updatedAt reviewDecision
+        url title updatedAt reviewDecision mergeable mergeStateStatus
         repository { nameWithOwner }
         latestReviews(first: 30) { nodes { state submittedAt author { __typename login } } }
         reviews(last: 20) { nodes { state submittedAt author { __typename login } } }
@@ -69,7 +70,9 @@ query($q: String!) {
 # id prefix -> action, most pressing first
 MINE_ACTIONS = {
     "ci": "checks failing",
+    "conflict": "merge conflict",
     "changes": "changes requested",
+    "behind": "behind base",
     "approved": "approved",
     "partial": "partly approved",
     "talked": "commented",
@@ -128,8 +131,13 @@ class GitHubSource:
         headers = _headers(ctx.settings["token"])
         items: list[Item] = []
         if "review_requests" in watch:
-            search = ctx.http.get_json(f"{API}/search/issues", headers=headers, params={"q": REVIEW_QUERY, "per_page": 100})
-            items += parse_review_search(search)
+            direct = ctx.http.get_json(f"{API}/search/issues", headers=headers, params={"q": DIRECT_REVIEW_QUERY, "per_page": 100})
+            everyone = ctx.http.get_json(f"{API}/search/issues", headers=headers, params={"q": REVIEW_QUERY, "per_page": 100})
+            items += parse_review_search(direct)
+            mine = {i.url for i in items}
+            team = [i for i in parse_review_search(everyone, team=True) if i.url not in mine]
+            ctx.quiet.update(i.id for i in team)  # asked of a whole team: listed, but no popup
+            items += team
 
         if "mine" in watch:
             items += self._mine(ctx, headers)
@@ -329,14 +337,15 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
-def parse_review_search(data: dict[str, Any]) -> list[Item]:
+def parse_review_search(data: dict[str, Any], team: bool = False) -> list[Item]:
+    """Review requests. `team` marks ones asked of a team you're in rather than of you by name."""
     items = []
     for pr in data.get("items", []):
         url = pr["html_url"]
         items.append(
             Item(
-                id=f"review:{url}",
-                action="review requested",
+                id=f"team-review:{url}" if team else f"review:{url}",
+                action="team review requested" if team else "review requested",
                 title=pr["title"].strip(),
                 url=url,
                 repo=_repo_from_api(pr["repository_url"]),
@@ -374,8 +383,12 @@ def parse_mine(pr: dict[str, Any], me: str) -> Item:
     who = ""
     if checks in ("FAILURE", "ERROR"):
         key = "ci"
+    elif pr.get("mergeable") == "CONFLICTING":
+        key = "conflict"
     elif decision == "CHANGES_REQUESTED" or changes:
         key, who = "changes", (changes[-1][1] if changes else "")
+    elif pr.get("mergeStateStatus") == "BEHIND":  # the base branch moved and the repo wants it merged in first
+        key = "behind"
     elif approvals and decision in ("APPROVED", None):  # None: the repo doesn't require reviews
         key, who = "approved", approvals[-1][1]
     elif approvals:
