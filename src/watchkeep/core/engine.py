@@ -23,6 +23,7 @@ from .config import DEFAULT_INTERVAL, SourceConfig
 from .connections import CONNECTIONS, resolve_secret
 from .diff import diff_snapshot
 from .health import FAILING, Health, Rule, step
+from .leader import SyncLeader
 from .models import Appointment, ArchiveEntry, HealthView, Item, ItemView, Sample, SourceView, State
 from .notify import FAILING as FAILING_EVENT
 from .notify import NEW_ITEM, RECOVERED, DesktopChannel, Event
@@ -76,8 +77,10 @@ class Core:
         clock: Callable[[], float] = time.time,
         tick: float = 5.0,
         desktop: DesktopChannel | None = None,
+        leader: SyncLeader | None = None,
     ) -> None:
         self._plugins = plugins
+        self._leader = leader  # None: this process always syncs (tests, single process)
         self._desktop = desktop or DesktopChannel()
         self._events: deque[Event] = deque(maxlen=200)
         self._seq = 0
@@ -381,12 +384,23 @@ class Core:
     # -- scheduling -------------------------------------------------------------
 
     async def run(self) -> None:
-        """Sync each source when it is due. Runs until cancelled."""
+        """Sync each source when it is due. Runs until cancelled.
+
+        With a leader, only the process holding it syncs on schedule. The others re-read
+        the database every tick to show what the syncing process wrote (see leader.py).
+        """
         while True:
-            due = [i for i in self._runnable() if self._is_due(i)]
-            if due:
-                await asyncio.gather(*(self._sync_source(i) for i in due))
+            if self._leader is None or self._leader.acquire():
+                due = [i for i in self._runnable() if self._is_due(i)]
+                if due:
+                    await asyncio.gather(*(self._sync_source(i) for i in due))
+            else:
+                self._bump()
             await asyncio.sleep(self._tick)
+
+    def syncs_elsewhere(self) -> bool:
+        """True while another process (e.g. `watchkeep run`) does the scheduled syncing."""
+        return self._leader is not None and not self._leader.held and self._leader.other_is_syncing()
 
     def _runnable(self) -> list[str]:
         return list(self._sources)
