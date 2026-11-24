@@ -115,11 +115,11 @@ def test_failed_state_lookup_keeps_the_row():
 
 
 def test_subject_without_state_is_kept():
-    from watchkeep.plugins.github import _is_closed
+    from watchkeep.plugins.github import _subject
 
     thread = {"subject": {"url": "https://api.github.com/repos/a/b/releases/1"}}
     http = FakeHttp({})
-    assert _is_closed(SyncContext(settings={}, http=http), {}, thread) is False
+    assert _subject(SyncContext(settings={}, http=http), {}, thread) is None
     assert http.calls == []
 
 
@@ -227,6 +227,7 @@ def test_unreviewed_is_opt_in():
 
 def _pr(n, title="PR", repo="acme/widgets"):
     return {
+        "number": n,
         "html_url": f"https://github.com/{repo}/pull/{n}",
         "title": f" {title} {n} ",
         "repository_url": f"https://api.github.com/repos/{repo}",
@@ -236,14 +237,19 @@ def _pr(n, title="PR", repo="acme/widgets"):
 
 
 class SearchHttp:
-    """Answers /search/issues by the qualifier in q; a qualifier mapped to an exception raises it."""
+    """Answers /search/issues by the qualifier in q (an exception raises), other URLs from `routes`."""
 
-    def __init__(self, by_qualifier):
+    def __init__(self, by_qualifier, routes=None):
         self.by_qualifier = by_qualifier
+        self.routes = routes or {}
         self.queries = []
 
     def get_json(self, url, *, headers=None, params=None):
-        assert url == "https://api.github.com/search/issues"
+        if url != "https://api.github.com/search/issues":
+            answer = self.routes.get(url, [])
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         q = params["q"]
         self.queries.append(q)
         for qualifier, answer in self.by_qualifier.items():
@@ -254,8 +260,8 @@ class SearchHttp:
         return {"items": []}
 
 
-def sync_mine(by_qualifier):
-    http = SearchHttp(by_qualifier)
+def sync_mine(by_qualifier, routes=None):
+    http = SearchHttp(by_qualifier, routes)
     ctx = SyncContext(settings={"account": "me", "token": "t", "watch": ["mine"]}, http=http)
     return GitHubSource().sync(ctx), ctx, http
 
@@ -289,3 +295,65 @@ def test_my_prs_are_off_for_sources_from_before_watch_had_them():
     _, calls = sync_with(["review_requests", "comments", "mentions"])
     assert calls.count("https://api.github.com/search/issues") == 1
     assert next(s for s in GitHubSource.settings if s.key == "watch").choices[3].value == "mine"
+
+
+REVIEWS = "https://api.github.com/repos/acme/widgets/pulls/{}/reviews"
+
+
+def test_approved_and_changes_rows_name_the_latest_such_reviewer():
+    items, _, _ = sync_mine(
+        {"review:changes_requested": [_pr(2)], "review:approved": [_pr(3), _pr(4)]},
+        {
+            REVIEWS.format(2): [{"user": {"login": "bob"}, "state": "CHANGES_REQUESTED"}, {"user": {"login": "eve"}, "state": "COMMENTED"}],
+            REVIEWS.format(3): [{"user": {"login": "ana"}, "state": "APPROVED"}, {"user": {"login": "dan"}, "state": "APPROVED"}],
+            REVIEWS.format(4): RuntimeError("boom"),
+        },
+    )
+    assert [(i.action, i.author) for i in items] == [("changes requested", "bob"), ("approved", "dan"), ("approved", "")]
+
+
+def _thread(reason, n, comment=None):
+    return {
+        "reason": reason,
+        "updated_at": "2026-10-16T10:00:00Z",
+        "subject": {
+            "title": f"PR {n}",
+            "type": "PullRequest",
+            "url": f"https://api.github.com/repos/acme/widgets/pulls/{n}",
+            "latest_comment_url": comment,
+        },
+        "repository": {"full_name": "acme/widgets", "html_url": "https://github.com/acme/widgets"},
+    }
+
+
+class NotifHttp(SearchHttp):
+    def __init__(self, threads, pulls, comments):
+        routes = {"https://api.github.com/notifications": threads}
+        for n, (author, state) in pulls.items():
+            routes[f"https://api.github.com/repos/acme/widgets/pulls/{n}"] = {"state": state, "user": {"login": author}}
+        routes.update(comments)
+        super().__init__({}, routes)
+
+
+def test_comments_on_my_prs_become_activity_whatever_the_reason():
+    c = "https://api.github.com/repos/acme/widgets/issues/comments/7"
+    http = NotifHttp(
+        [_thread("author", 1, c), _thread("comment", 2), _thread("comment", 3), _thread("author", 4), _thread("mention", 5)],
+        {1: ("Me", "open"), 2: ("me", "open"), 3: ("someone", "open"), 4: ("me", "closed"), 5: ("me", "open")},
+        {c: {"html_url": "https://github.com/acme/widgets/pull/1#issuecomment-7", "user": {"login": "carol"}}},
+    )
+    ctx = SyncContext(settings={"account": "me", "token": "t", "watch": ["comments", "mine"]}, http=http)
+    items = GitHubSource().sync(ctx)
+    assert [(i.id, i.action, i.author) for i in items] == [
+        ("activity:https://github.com/acme/widgets/pull/1", "activity on my PR", "carol"),
+        ("activity:https://github.com/acme/widgets/pull/2", "activity on my PR", ""),
+        ("commented:https://github.com/acme/widgets/pull/3", "commented", ""),  # not mine: a plain comment row
+        ("activity:https://github.com/acme/widgets/pull/5", "activity on my PR", ""),  # mentions not watched, but it's mine
+    ]
+    assert items[0].url.endswith("#issuecomment-7")
+
+
+def test_without_my_prs_author_notifications_stay_hidden():
+    http = NotifHttp([_thread("author", 1), _thread("comment", 2)], {1: ("me", "open"), 2: ("me", "open")}, {})
+    items = GitHubSource().sync(SyncContext(settings={"account": "me", "token": "t", "watch": ["comments"]}, http=http))
+    assert [(i.action, i.url) for i in items] == [("commented", "https://github.com/acme/widgets/pull/2")]

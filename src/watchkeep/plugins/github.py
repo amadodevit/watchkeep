@@ -20,7 +20,14 @@ qualifier, so it is three searches and no per-PR lookups. A PR shows once, with
 the most urgent state first: failing checks beat changes requested, which beat
 approved (an approved PR with red checks isn't ready). Drafts are skipped. The
 state is part of the id, so a PR moving from "changes requested" to "approved"
-shows (and notifies) as new.
+shows (and notifies) as new. Approved and changes-requested rows name the
+reviewer, which costs one reviews call per such PR.
+
+With "My PRs" on, unread notifications on the account's own open PRs (someone
+commented or reviewed) become "activity on my PR" rows, whatever GitHub gives as
+the reason ("author", or "comment"/"mention" once you've joined in), instead of
+plain comment/mention rows. They sit next to the state row of the same PR, so a
+UI can show "approved by ana, new comment from carla" as one line.
 """
 
 from __future__ import annotations
@@ -48,6 +55,10 @@ MINE_STATES = (
     ("changes", "changes requested", "review:changes_requested"),
     ("approved", "approved", "review:approved"),
 )
+REVIEW_STATES = {"changes": "CHANGES_REQUESTED", "approved": "APPROVED"}  # whose review to name
+MY_ACTIVITY = "activity on my PR"
+# reasons a notification on your own PR can come with
+MINE_REASONS = {"author", "comment", "mention", "team_mention"}
 MAX_REPO_PAGES = 10  # the repo picker stops at 1 000 repos
 
 
@@ -107,21 +118,30 @@ class GitHubSource:
         if "unreviewed" in watch:
             items += self._unreviewed(ctx, headers)
 
-        if not watch & {"comments", "mentions"}:
+        mine_on = "mine" in watch
+        if not watch & {"comments", "mentions"} and not mine_on:
             return items
+        me = str(ctx.settings.get("account", "")).lower()
         notifications = ctx.http.get_json(f"{API}/notifications", headers=headers, params={"per_page": 50})
         for thread in notifications:
-            if REASON_WATCH.get(thread.get("reason", "")) not in watch:
+            reason = thread.get("reason", "")
+            wanted = REASON_WATCH.get(reason) in watch
+            if not wanted and not (mine_on and reason in MINE_REASONS):
                 continue
-            if _is_closed(ctx, headers, thread):
+            subject = _subject(ctx, headers, thread)
+            if subject and subject.get("state") == "closed":
                 continue  # merged/closed: nothing left to act on, even if the notification is unread
+            pr_author = ((subject or {}).get("user") or {}).get("login", "").lower()
+            on_mine = mine_on and bool(me) and thread["subject"].get("type") == "PullRequest" and pr_author == me
+            if not (on_mine or wanted):
+                continue
             comment = None
             if comment_url := thread["subject"].get("latest_comment_url"):
                 try:
                     comment = ctx.http.get_json(comment_url, headers=headers)
                 except Exception:
                     comment = None  # still show the row, just without author/deep link
-            if item := parse_notification(thread, comment):
+            if item := (parse_my_activity(thread, comment) if on_mine else parse_notification(thread, comment)):
                 items.append(item)
         return items
 
@@ -152,10 +172,12 @@ class GitHubSource:
                 ctx.warnings.append(f"my PRs ({action}): search failed ({_short(exc)})")
                 failed = True
                 continue
-            for item in parse_mine_search(search, key, action):
-                if item.url not in shown:
-                    shown.add(item.url)
-                    items.append(item)
+            for pr in search.get("items", []):
+                if pr["html_url"] in shown:
+                    continue
+                shown.add(pr["html_url"])
+                reviewer = _reviewer(ctx, headers, pr, REVIEW_STATES[key]) if key in REVIEW_STATES else ""
+                items.append(parse_mine(pr, key, action, reviewer))
         return items
 
     def _unreviewed(self, ctx: SyncContext, headers: dict[str, str]) -> list[Item]:
@@ -242,19 +264,32 @@ def parse_gh_hosts(data: dict[str, Any]) -> list[Candidate]:
     return candidates
 
 
-def _is_closed(ctx: SyncContext, headers: dict[str, str], thread: dict[str, Any]) -> bool:
-    """True when the thread's PR or issue is closed (merged PRs are closed too).
+def _subject(ctx: SyncContext, headers: dict[str, str], thread: dict[str, Any]) -> dict[str, Any] | None:
+    """The thread's PR or issue as the API gives it (state, author), or None.
 
     Subjects without a state (discussions, releases, commits) and failed lookups
-    count as open: better a stale row than a silently hidden one.
+    give None, which callers treat as open: better a stale row than a silently
+    hidden one.
     """
     url = thread["subject"].get("url") or ""
     if not re.search(r"/(pulls|issues)/\d+$", url):
-        return False
+        return None
     try:
-        return ctx.http.get_json(url, headers=headers).get("state") == "closed"
+        data = ctx.http.get_json(url, headers=headers)
     except Exception:
-        return False
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _reviewer(ctx: SyncContext, headers: dict[str, str], pr: dict[str, Any], state: str) -> str:
+    """Login of the latest review in `state` on this PR; "" when it can't be told."""
+    repo = _repo_from_api(pr["repository_url"])
+    try:
+        reviews = ctx.http.get_json(f"{API}/repos/{repo}/pulls/{pr['number']}/reviews", headers=headers, params={"per_page": 100})
+    except Exception:
+        return ""
+    logins = [(r.get("user") or {}).get("login", "") for r in reviews if r.get("state") == state]
+    return logins[-1] if logins else ""
 
 
 def _waiting_for_reviewer(pr: dict[str, Any], me: str) -> bool:
@@ -313,19 +348,34 @@ def parse_review_search(data: dict[str, Any]) -> list[Item]:
     return items
 
 
-def parse_mine_search(data: dict[str, Any], key: str, action: str) -> list[Item]:
-    return [
-        Item(
-            id=f"{key}:{pr['html_url']}",
-            action=action,
-            title=pr["title"].strip(),
-            url=pr["html_url"],
-            repo=_repo_from_api(pr["repository_url"]),
-            author=pr["user"]["login"],
-            updated_at=pr["updated_at"],
-        )
-        for pr in data.get("items", [])
-    ]
+def parse_mine(pr: dict[str, Any], key: str, action: str, reviewer: str = "") -> Item:
+    """One of your PRs in a state. `author` is who put it there (the reviewer), if known."""
+    return Item(
+        id=f"{key}:{pr['html_url']}",
+        action=action,
+        title=pr["title"].strip(),
+        url=pr["html_url"],
+        repo=_repo_from_api(pr["repository_url"]),
+        author=reviewer,
+        updated_at=pr["updated_at"],
+    )
+
+
+def parse_my_activity(thread: dict[str, Any], comment: dict[str, Any] | None) -> Item | None:
+    """Someone commented on or reviewed one of your PRs. The id is the PR, so one row per PR."""
+    subject = thread["subject"]
+    pr_url = api_to_html(subject.get("url"))
+    if not pr_url:
+        return None
+    return Item(
+        id=f"activity:{pr_url}",
+        action=MY_ACTIVITY,
+        title=subject["title"].strip(),
+        url=(comment or {}).get("html_url") or pr_url,
+        repo=thread["repository"]["full_name"],
+        author=((comment or {}).get("user") or {}).get("login", ""),
+        updated_at=thread["updated_at"],
+    )
 
 
 def parse_notification(thread: dict[str, Any], comment: dict[str, Any] | None) -> Item | None:
