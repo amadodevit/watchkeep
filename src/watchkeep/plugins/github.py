@@ -1,4 +1,5 @@
-"""GitHub source: open review requests, unread comments and mentions, and PRs nobody was asked to review.
+"""GitHub source: open review requests, unread comments and mentions, PRs nobody was asked to review,
+and the account's own PRs that are waiting on it.
 
 Review requests come from search (a true snapshot: once you review, the PR drops
 out). Comments and mentions come from unread notifications (they drop out when
@@ -12,6 +13,14 @@ list once a reviewer submits, so the review history is what tells "forgotten"
 from "done"). Drafts and the account's own PRs are skipped. The PRs already
 waiting when a repo is first watched show without a popup (ctx.quiet): those are
 often the forgotten ones. Only PRs opened later notify.
+
+"My PRs" rows are the account's own open PRs that need it to act: checks failing,
+changes requested, or approved (ready to merge). Each comes from a search
+qualifier, so it is three searches and no per-PR lookups. A PR shows once, with
+the most urgent state first: failing checks beat changes requested, which beat
+approved (an approved PR with red checks isn't ready). Drafts are skipped. The
+state is part of the id, so a PR moving from "changes requested" to "approved"
+shows (and notifies) as new.
 """
 
 from __future__ import annotations
@@ -31,7 +40,14 @@ REVIEW_QUERY = "is:pr is:open review-requested:@me archived:false"
 NOTIFICATION_ACTIONS = {"comment": "commented", "mention": "mentioned", "team_mention": "mentioned"}
 # notification reason -> the "watch" choice that enables it
 REASON_WATCH = {"comment": "comments", "mention": "mentions", "team_mention": "mentions"}
-WATCH_ALL = ("review_requests", "comments", "mentions")  # sources from before "watch" existed; "unreviewed" is opt-in
+WATCH_ALL = ("review_requests", "comments", "mentions")  # sources from before "watch" existed; the rest are opt-in
+MINE_QUERY = "is:pr is:open author:@me archived:false draft:false"
+# most urgent first: a PR shows only under the first state it matches
+MINE_STATES = (
+    ("ci", "checks failing", "status:failure"),
+    ("changes", "changes requested", "review:changes_requested"),
+    ("approved", "approved", "review:approved"),
+)
 MAX_REPO_PAGES = 10  # the repo picker stops at 1 000 repos
 
 
@@ -54,6 +70,7 @@ class GitHubSource:
                 Choice("review_requests", "Review requests"),
                 Choice("comments", "Comments"),
                 Choice("mentions", "Mentions"),
+                Choice("mine", "My PRs: checks failing, changes requested, approved"),
                 Choice("unreviewed", "PRs with no reviewer (in the repos below)", default=False),
             ),
         ),
@@ -83,6 +100,9 @@ class GitHubSource:
         if "review_requests" in watch:
             search = ctx.http.get_json(f"{API}/search/issues", headers=headers, params={"q": REVIEW_QUERY, "per_page": 100})
             items += parse_review_search(search)
+
+        if "mine" in watch:
+            items += self._mine(ctx, headers)
 
         if "unreviewed" in watch:
             items += self._unreviewed(ctx, headers)
@@ -116,6 +136,27 @@ class GitHubSource:
             if len(batch) < 100:
                 break
         return sorted(names, key=str.lower)
+
+    def _mine(self, ctx: SyncContext, headers: dict[str, str]) -> list[Item]:
+        shown: set[str] = set()
+        items: list[Item] = []
+        failed = False
+        for key, action, qualifier in MINE_STATES:
+            if key == "approved" and failed:
+                continue  # can't rule out red checks or requested changes: don't call anything ready
+            try:
+                search = ctx.http.get_json(
+                    f"{API}/search/issues", headers=headers, params={"q": f"{MINE_QUERY} {qualifier}", "per_page": 100}
+                )
+            except Exception as exc:
+                ctx.warnings.append(f"my PRs ({action}): search failed ({_short(exc)})")
+                failed = True
+                continue
+            for item in parse_mine_search(search, key, action):
+                if item.url not in shown:
+                    shown.add(item.url)
+                    items.append(item)
+        return items
 
     def _unreviewed(self, ctx: SyncContext, headers: dict[str, str]) -> list[Item]:
         patterns = _split(ctx.settings.get("repos"))
@@ -270,6 +311,21 @@ def parse_review_search(data: dict[str, Any]) -> list[Item]:
             )
         )
     return items
+
+
+def parse_mine_search(data: dict[str, Any], key: str, action: str) -> list[Item]:
+    return [
+        Item(
+            id=f"{key}:{pr['html_url']}",
+            action=action,
+            title=pr["title"].strip(),
+            url=pr["html_url"],
+            repo=_repo_from_api(pr["repository_url"]),
+            author=pr["user"]["login"],
+            updated_at=pr["updated_at"],
+        )
+        for pr in data.get("items", [])
+    ]
 
 
 def parse_notification(thread: dict[str, Any], comment: dict[str, Any] | None) -> Item | None:

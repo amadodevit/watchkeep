@@ -13,6 +13,7 @@ Changes to the plugin contract are marked **Plugins**.
 - **Plugins:** the entry-point group is now `watchkeep.sources` and the contract imports from `watchkeep.core.plugin`. Breaking for plugins written against the unreleased fly-monitor name; nothing was published under it.
 - Terminal UI with sources grouped and collapsible.
 - GitHub source: review requests, comments and mentions, accounts detected through `gh`.
+- GitHub source: "My PRs": your own open PRs with checks failing, changes requested, or approved and ready to merge, each shown once under the most urgent state (three searches per sync, no per-PR calls). On for new sources; sources added before need it ticked under Watch.
 - GitHub source: optional "PRs with no reviewer" in picked repos (names or patterns): open PRs nobody was asked to review, assigned or reviewed yet, drafts and your own skipped. PRs already waiting when a repo is first watched show without a popup.
 - Website source: status code and response time, failing after 5 of the last 10 checks.
 - Desktop and in-app notifications, acknowledge and close, ignore.

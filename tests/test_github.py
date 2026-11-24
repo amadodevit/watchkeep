@@ -220,3 +220,72 @@ def test_repo_picker_pages_until_a_short_page():
 def test_unreviewed_is_opt_in():
     _, calls = sync_with(None)
     assert PULLS not in calls
+
+
+# -- my PRs -----------------------------------------------------------------------
+
+
+def _pr(n, title="PR", repo="acme/widgets"):
+    return {
+        "html_url": f"https://github.com/{repo}/pull/{n}",
+        "title": f" {title} {n} ",
+        "repository_url": f"https://api.github.com/repos/{repo}",
+        "user": {"login": "me"},
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+
+
+class SearchHttp:
+    """Answers /search/issues by the qualifier in q; a qualifier mapped to an exception raises it."""
+
+    def __init__(self, by_qualifier):
+        self.by_qualifier = by_qualifier
+        self.queries = []
+
+    def get_json(self, url, *, headers=None, params=None):
+        assert url == "https://api.github.com/search/issues"
+        q = params["q"]
+        self.queries.append(q)
+        for qualifier, answer in self.by_qualifier.items():
+            if q.endswith(qualifier):
+                if isinstance(answer, Exception):
+                    raise answer
+                return {"items": answer}
+        return {"items": []}
+
+
+def sync_mine(by_qualifier):
+    http = SearchHttp(by_qualifier)
+    ctx = SyncContext(settings={"account": "me", "token": "t", "watch": ["mine"]}, http=http)
+    return GitHubSource().sync(ctx), ctx, http
+
+
+def test_my_prs_show_once_under_the_most_urgent_state():
+    items, _, http = sync_mine({
+        "status:failure": [_pr(1)],
+        "review:changes_requested": [_pr(2)],
+        "review:approved": [_pr(1), _pr(3)],  # 1 is approved but red: not ready
+    })
+    assert [(i.id, i.action) for i in items] == [
+        ("ci:https://github.com/acme/widgets/pull/1", "checks failing"),
+        ("changes:https://github.com/acme/widgets/pull/2", "changes requested"),
+        ("approved:https://github.com/acme/widgets/pull/3", "approved"),
+    ]
+    assert items[0].title == "PR 1" and items[0].repo == "acme/widgets"
+    assert all("author:@me" in q and "draft:false" in q and "is:open" in q for q in http.queries)
+
+
+def test_failed_search_warns_and_never_calls_a_pr_ready():
+    items, ctx, _ = sync_mine({
+        "status:failure": RuntimeError("502 Bad Gateway"),
+        "review:changes_requested": [_pr(2)],
+        "review:approved": [_pr(3)],
+    })
+    assert [i.action for i in items] == ["changes requested"]
+    assert ctx.warnings == ["my PRs (checks failing): search failed (502 Bad Gateway)"]
+
+
+def test_my_prs_are_off_for_sources_from_before_watch_had_them():
+    _, calls = sync_with(["review_requests", "comments", "mentions"])
+    assert calls.count("https://api.github.com/search/issues") == 1
+    assert next(s for s in GitHubSource.settings if s.key == "watch").choices[3].value == "mine"
