@@ -27,6 +27,12 @@ class HttpConnection:
         response.raise_for_status()
         return response.json()
 
+    def post_json(self, url: str, *, headers: dict[str, str] | None = None, json: Any = None) -> Any:
+        """POST a JSON body and parse the JSON answer (e.g. a GraphQL query). Raises on 4xx/5xx."""
+        response = self._client.post(url, headers=headers, json=json)
+        response.raise_for_status()
+        return response.json()
+
     def get(self, url: str, *, headers: dict[str, str] | None = None, params: dict[str, Any] | None = None) -> httpx.Response:
         """GET following redirects, for bodies that aren't JSON (XML, HTML).
 

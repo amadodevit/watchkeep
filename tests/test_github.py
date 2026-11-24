@@ -225,17 +225,6 @@ def test_unreviewed_is_opt_in():
 # -- my PRs -----------------------------------------------------------------------
 
 
-def _pr(n, title="PR", repo="acme/widgets"):
-    return {
-        "number": n,
-        "html_url": f"https://github.com/{repo}/pull/{n}",
-        "title": f" {title} {n} ",
-        "repository_url": f"https://api.github.com/repos/{repo}",
-        "user": {"login": "me"},
-        "updated_at": "2026-01-01T00:00:00Z",
-    }
-
-
 class SearchHttp:
     """Answers /search/issues by the qualifier in q (an exception raises), other URLs from `routes`."""
 
@@ -260,56 +249,79 @@ class SearchHttp:
         return {"items": []}
 
 
-def sync_mine(by_qualifier, routes=None):
-    http = SearchHttp(by_qualifier, routes)
-    ctx = SyncContext(settings={"account": "me", "token": "t", "watch": ["mine"]}, http=http)
-    return GitHubSource().sync(ctx), ctx, http
-
-
-def test_my_prs_show_once_under_the_most_urgent_state():
-    items, _, http = sync_mine({
-        "status:failure": [_pr(1)],
-        "review:changes_requested": [_pr(2)],
-        "review:approved": [_pr(1), _pr(3)],  # 1 is approved but red: not ready
-    })
-    assert [(i.id, i.action) for i in items] == [
-        ("ci:https://github.com/acme/widgets/pull/1", "checks failing"),
-        ("changes:https://github.com/acme/widgets/pull/2", "changes requested"),
-        ("approved:https://github.com/acme/widgets/pull/3", "approved"),
-    ]
-    assert items[0].title == "PR 1" and items[0].repo == "acme/widgets"
-    assert all("author:@me" in q and "draft:false" in q and "is:open" in q for q in http.queries)
-
-
-def test_failed_search_warns_and_never_calls_a_pr_ready():
-    items, ctx, _ = sync_mine({
-        "status:failure": RuntimeError("502 Bad Gateway"),
-        "review:changes_requested": [_pr(2)],
-        "review:approved": [_pr(3)],
-    })
-    assert [i.action for i in items] == ["changes requested"]
-    assert ctx.warnings == ["my PRs (checks failing): search failed (502 Bad Gateway)"]
-
-
 def test_my_prs_are_off_for_sources_from_before_watch_had_them():
     _, calls = sync_with(["review_requests", "comments", "mentions"])
     assert calls.count("https://api.github.com/search/issues") == 1
     assert next(s for s in GitHubSource.settings if s.key == "watch").choices[3].value == "mine"
 
 
-REVIEWS = "https://api.github.com/repos/acme/widgets/pulls/{}/reviews"
+def _node(n, *, decision=None, checks="SUCCESS", latest=(), reviews=(), comments=()):
+    person = lambda login: {"__typename": "Bot" if login.endswith("[bot]") else "User", "login": login}
+    return {
+        "url": f"https://github.com/acme/widgets/pull/{n}",
+        "title": f" PR {n} ",
+        "updatedAt": "2026-01-01T00:00:00Z",
+        "reviewDecision": decision,
+        "repository": {"nameWithOwner": "acme/widgets"},
+        "latestReviews": {"nodes": [{"state": st, "submittedAt": t, "author": person(who)} for who, st, t in latest]},
+        "reviews": {"nodes": [{"state": st, "submittedAt": t, "author": person(who)} for who, st, t in reviews]},
+        "comments": {"nodes": [{"createdAt": t, "author": person(who)} for who, t in comments]},
+        "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": checks} if checks else None}}]},
+    }
 
 
-def test_approved_and_changes_rows_name_the_latest_such_reviewer():
-    items, _, _ = sync_mine(
-        {"review:changes_requested": [_pr(2)], "review:approved": [_pr(3), _pr(4)]},
-        {
-            REVIEWS.format(2): [{"user": {"login": "bob"}, "state": "CHANGES_REQUESTED"}, {"user": {"login": "eve"}, "state": "COMMENTED"}],
-            REVIEWS.format(3): [{"user": {"login": "ana"}, "state": "APPROVED"}, {"user": {"login": "dan"}, "state": "APPROVED"}],
-            REVIEWS.format(4): RuntimeError("boom"),
-        },
+class GraphQLHttp:
+    def __init__(self, answer):
+        self.answer = answer
+        self.posts = []
+
+    def get_json(self, url, *, headers=None, params=None):
+        assert url == "https://api.github.com/notifications"
+        return []
+
+    def post_json(self, url, *, headers=None, json=None):
+        self.posts.append((url, json))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def mine(*nodes, answer=None):
+    http = GraphQLHttp(answer if answer is not None else {"data": {"search": {"nodes": list(nodes)}}})
+    ctx = SyncContext(settings={"account": "Me", "token": "t", "watch": ["mine"]}, http=http)
+    return GitHubSource().sync(ctx), ctx, http
+
+
+def test_my_prs_each_show_once_under_their_most_pressing_state():
+    items, ctx, http = mine(
+        _node(1, checks="FAILURE", decision="APPROVED", latest=[("ana", "APPROVED", "t1")]),
+        _node(2, decision="CHANGES_REQUESTED", latest=[("bob", "CHANGES_REQUESTED", "t1")]),
+        _node(3, decision="APPROVED", latest=[("ana", "APPROVED", "t1"), ("dan", "APPROVED", "t2")]),
+        _node(4, decision="REVIEW_REQUIRED", latest=[("ana", "APPROVED", "t1")], comments=[("eve", "t3")]),
+        _node(5, decision="REVIEW_REQUIRED", reviews=[("carol", "COMMENTED", "t1")], comments=[("dave", "t2")]),
+        _node(6, decision="REVIEW_REQUIRED", comments=[("github-actions[bot]", "t1"), ("me", "t2")]),
+        _node(7, decision=None, latest=[("ana", "APPROVED", "t1")]),  # repo without required reviews
     )
-    assert [(i.action, i.author) for i in items] == [("changes requested", "bob"), ("approved", "dan"), ("approved", "")]
+    assert [(i.id.split(":")[0], i.action, i.author) for i in items] == [
+        ("ci", "checks failing", ""),
+        ("changes", "changes requested", "bob"),
+        ("approved", "approved", "dan"),
+        ("partial", "partly approved", "ana"),
+        ("talked", "commented", "dave"),
+        ("waiting", "waiting for review", ""),  # bots and yourself don't count
+        ("approved", "approved", "ana"),
+    ]
+    assert items[0].title == "PR 1" and items[0].repo == "acme/widgets"
+    assert ctx.quiet == {"waiting:https://github.com/acme/widgets/pull/6"}  # just your PR being open: no popup
+    url, body = http.posts[0]
+    assert url == "https://api.github.com/graphql" and "author:@me" in body["variables"]["q"] and "draft:false" in body["variables"]["q"]
+
+
+def test_failed_query_warns_and_shows_none():
+    items, ctx, _ = mine(answer=RuntimeError("502 Bad Gateway"))
+    assert items == [] and ctx.warnings == ["my PRs: query failed (502 Bad Gateway)"]
+    items, ctx, _ = mine(answer={"errors": [{"message": "Bad credentials"}]})
+    assert items == [] and ctx.warnings == ["my PRs: query failed (Bad credentials)"]
 
 
 def _thread(reason, n, comment=None):
@@ -333,6 +345,9 @@ class NotifHttp(SearchHttp):
             routes[f"https://api.github.com/repos/acme/widgets/pulls/{n}"] = {"state": state, "user": {"login": author}}
         routes.update(comments)
         super().__init__({}, routes)
+
+    def post_json(self, url, *, headers=None, json=None):
+        return {"data": {"search": {"nodes": []}}}
 
 
 def test_comments_on_my_prs_become_activity_whatever_the_reason():

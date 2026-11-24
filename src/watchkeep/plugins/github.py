@@ -14,14 +14,15 @@ from "done"). Drafts and the account's own PRs are skipped. The PRs already
 waiting when a repo is first watched show without a popup (ctx.quiet): those are
 often the forgotten ones. Only PRs opened later notify.
 
-"My PRs" rows are the account's own open PRs that need it to act: checks failing,
-changes requested, or approved (ready to merge). Each comes from a search
-qualifier, so it is three searches and no per-PR lookups. A PR shows once, with
-the most urgent state first: failing checks beat changes requested, which beat
-approved (an approved PR with red checks isn't ready). Drafts are skipped. The
-state is part of the id, so a PR moving from "changes requested" to "approved"
-shows (and notifies) as new. Approved and changes-requested rows name the
-reviewer, which costs one reviews call per such PR.
+"My PRs" lists every open, non-draft PR of the account, one row each, from a
+single GraphQL query (search plus reviews, last comments and the checks rollup).
+The row's action is its most pressing state: checks failing, changes requested,
+approved, partly approved (approvals, but the repo wants more), commented (someone
+else reviewed or commented), or waiting for review (nobody has yet). `author` is
+who put it there: the reviewer, or the last person to comment or review. Bots
+don't count as interaction. The state is part of the id, so a PR moving from
+"changes requested" to "approved" shows (and notifies) as new; "waiting for
+review" rows never pop up, since they are just your own PRs being open.
 
 With "My PRs" on, unread notifications on the account's own open PRs (someone
 commented or reviewed) become "activity on my PR" rows, whatever GitHub gives as
@@ -49,13 +50,31 @@ NOTIFICATION_ACTIONS = {"comment": "commented", "mention": "mentioned", "team_me
 REASON_WATCH = {"comment": "comments", "mention": "mentions", "team_mention": "mentions"}
 WATCH_ALL = ("review_requests", "comments", "mentions")  # sources from before "watch" existed; the rest are opt-in
 MINE_QUERY = "is:pr is:open author:@me archived:false draft:false"
-# most urgent first: a PR shows only under the first state it matches
-MINE_STATES = (
-    ("ci", "checks failing", "status:failure"),
-    ("changes", "changes requested", "review:changes_requested"),
-    ("approved", "approved", "review:approved"),
-)
-REVIEW_STATES = {"changes": "CHANGES_REQUESTED", "approved": "APPROVED"}  # whose review to name
+MINE_GRAPHQL = """
+query($q: String!) {
+  search(query: $q, type: ISSUE, first: 50) {
+    nodes {
+      ... on PullRequest {
+        url title updatedAt reviewDecision
+        repository { nameWithOwner }
+        latestReviews(first: 30) { nodes { state submittedAt author { __typename login } } }
+        reviews(last: 20) { nodes { state submittedAt author { __typename login } } }
+        comments(last: 20) { nodes { createdAt author { __typename login } } }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}
+"""
+# id prefix -> action, most pressing first
+MINE_ACTIONS = {
+    "ci": "checks failing",
+    "changes": "changes requested",
+    "approved": "approved",
+    "partial": "partly approved",
+    "talked": "commented",
+    "waiting": "waiting for review",
+}
 MY_ACTIVITY = "activity on my PR"
 # reasons a notification on your own PR can come with
 MINE_REASONS = {"author", "comment", "mention", "team_mention"}
@@ -158,26 +177,17 @@ class GitHubSource:
         return sorted(names, key=str.lower)
 
     def _mine(self, ctx: SyncContext, headers: dict[str, str]) -> list[Item]:
-        shown: set[str] = set()
-        items: list[Item] = []
-        failed = False
-        for key, action, qualifier in MINE_STATES:
-            if key == "approved" and failed:
-                continue  # can't rule out red checks or requested changes: don't call anything ready
-            try:
-                search = ctx.http.get_json(
-                    f"{API}/search/issues", headers=headers, params={"q": f"{MINE_QUERY} {qualifier}", "per_page": 100}
-                )
-            except Exception as exc:
-                ctx.warnings.append(f"my PRs ({action}): search failed ({_short(exc)})")
-                failed = True
-                continue
-            for pr in search.get("items", []):
-                if pr["html_url"] in shown:
-                    continue
-                shown.add(pr["html_url"])
-                reviewer = _reviewer(ctx, headers, pr, REVIEW_STATES[key]) if key in REVIEW_STATES else ""
-                items.append(parse_mine(pr, key, action, reviewer))
+        try:
+            answer = ctx.http.post_json(f"{API}/graphql", headers=headers, json={"query": MINE_GRAPHQL, "variables": {"q": MINE_QUERY}})
+            if answer.get("errors") and not answer.get("data"):
+                raise RuntimeError(answer["errors"][0].get("message", "GraphQL error"))
+            nodes = answer["data"]["search"]["nodes"]
+        except Exception as exc:
+            ctx.warnings.append(f"my PRs: query failed ({_short(exc)})")
+            return []
+        me = str(ctx.settings.get("account", "")).lower()
+        items = [parse_mine(pr, me) for pr in nodes if pr and pr.get("url")]
+        ctx.quiet.update(i.id for i in items if i.id.startswith("waiting:"))
         return items
 
     def _unreviewed(self, ctx: SyncContext, headers: dict[str, str]) -> list[Item]:
@@ -281,17 +291,6 @@ def _subject(ctx: SyncContext, headers: dict[str, str], thread: dict[str, Any]) 
     return data if isinstance(data, dict) else None
 
 
-def _reviewer(ctx: SyncContext, headers: dict[str, str], pr: dict[str, Any], state: str) -> str:
-    """Login of the latest review in `state` on this PR; "" when it can't be told."""
-    repo = _repo_from_api(pr["repository_url"])
-    try:
-        reviews = ctx.http.get_json(f"{API}/repos/{repo}/pulls/{pr['number']}/reviews", headers=headers, params={"per_page": 100})
-    except Exception:
-        return ""
-    logins = [(r.get("user") or {}).get("login", "") for r in reviews if r.get("state") == state]
-    return logins[-1] if logins else ""
-
-
 def _waiting_for_reviewer(pr: dict[str, Any], me: str) -> bool:
     """Open, not a draft, not mine, nobody asked to review and nobody assigned. Reviews are checked separately."""
     return (
@@ -348,16 +347,53 @@ def parse_review_search(data: dict[str, Any]) -> list[Item]:
     return items
 
 
-def parse_mine(pr: dict[str, Any], key: str, action: str, reviewer: str = "") -> Item:
-    """One of your PRs in a state. `author` is who put it there (the reviewer), if known."""
+def _people(nodes: Any, me: str, when: str) -> list[tuple[str, str, str]]:
+    """(time, login, state) of what others did, oldest first. Bots and the account itself are left out."""
+    out = []
+    for n in nodes or []:
+        author = (n or {}).get("author") or {}
+        login = author.get("login") or ""
+        if not login or login.lower() == me or author.get("__typename") == "Bot":
+            continue
+        out.append((n.get(when) or "", login, n.get("state") or ""))
+    return sorted(out)
+
+
+def parse_mine(pr: dict[str, Any], me: str) -> Item:
+    """One of your open PRs (a GraphQL node), under its most pressing state."""
+    latest = _people((pr.get("latestReviews") or {}).get("nodes"), me, "submittedAt")  # one per reviewer
+    talk = _people((pr.get("reviews") or {}).get("nodes"), me, "submittedAt")
+    talk += _people((pr.get("comments") or {}).get("nodes"), me, "createdAt")
+    talk = [t for t in sorted(talk) if t[2] != "PENDING"]
+    approvals = [t for t in latest if t[2] == "APPROVED"]
+    changes = [t for t in latest if t[2] == "CHANGES_REQUESTED"]
+    commits = (pr.get("commits") or {}).get("nodes") or [{}]
+    checks = (((commits[-1] or {}).get("commit") or {}).get("statusCheckRollup") or {}).get("state")
+    decision = pr.get("reviewDecision")
+
+    who = ""
+    if checks in ("FAILURE", "ERROR"):
+        key = "ci"
+    elif decision == "CHANGES_REQUESTED" or changes:
+        key, who = "changes", (changes[-1][1] if changes else "")
+    elif approvals and decision in ("APPROVED", None):  # None: the repo doesn't require reviews
+        key, who = "approved", approvals[-1][1]
+    elif approvals:
+        key, who = "partial", approvals[-1][1]
+    elif talk:
+        key = "talked"
+    else:
+        key = "waiting"
+    if not who and talk:
+        who = talk[-1][1]
     return Item(
-        id=f"{key}:{pr['html_url']}",
-        action=action,
-        title=pr["title"].strip(),
-        url=pr["html_url"],
-        repo=_repo_from_api(pr["repository_url"]),
-        author=reviewer,
-        updated_at=pr["updated_at"],
+        id=f"{key}:{pr['url']}",
+        action=MINE_ACTIONS[key],
+        title=(pr.get("title") or "").strip(),
+        url=pr["url"],
+        repo=(pr.get("repository") or {}).get("nameWithOwner", ""),
+        author=who,
+        updated_at=pr.get("updatedAt") or "",
     )
 
 
