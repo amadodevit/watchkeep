@@ -4,6 +4,7 @@ Changes to the plugin contract are marked **Plugins**.
 
 ## 0.1.0 (unreleased)
 
+- Command source: items from any local program that prints them as a JSON list (`id` and `title` required), run without a shell on each sync. A non-zero exit, a timeout or bad output fails the sync with the program's last stderr line, so a broken script shows as an error, not as nothing to do.
 - `watchkeep run`: the scheduler without the UI, for a login service (launchd, systemd). Only one process syncs a database at a time: a lock next to `state.db` decides, and the others (e.g. the UI opened alongside) only re-read what it writes, taking over when it stops.
 - `watchkeep status [--json]`: what needs you from the last syncs (open items and failing rows per source, appointments left out), for scripts and other tools. Never syncs; settings and secrets are not included.
 - Calendar source (`pip install 'watchkeep[calendar]'`): the next 31 days of appointments from a secret iCal address (Google Calendar gives one per calendar). Recurring meetings are expanded, cancelled ones dropped. An Agenda tab lists them by day, all-day first; what is over is struck through and what is happening now is marked. The tab shows only while a calendar source exists. On the Agenda, `d`, `x` and `w` show today, 3 days or a week from today (remembered); every day gets a header and free days read "nothing on". The source no longer has a "Days to show" setting; a stored one is ignored.

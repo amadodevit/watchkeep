@@ -88,6 +88,12 @@ A calendar is read from its secret iCal address: in Google Calendar, Settings â€
 Publish a calendar, then the ICS link. That address is a password, so it goes to the keyring like
 one. It is synced every 15 minutes; add one source per calendar and the Agenda merges them.
 
+A command source runs a program of yours on each sync (a full path, arguments split like a shell
+would, but no shell runs) and shows the items it prints as a JSON list: `[{"id": "a1", "title":
+"Invoice due", "url": "https://...", "author": "Utility Co", "updated_at": "..."}]`. Use it for
+anything a script already knows. If the program exits non-zero, times out or prints something
+else, the source shows its last stderr line as an error.
+
 New GitHub items, and websites or queues going failing or recovering, raise a desktop popup (notify-send) and an in-app toast,
 while watchkeep is open. A source's first sync stays quiet. Calendar events raise none. A source's header turns red while one of its
 rows is failing, even when folded, and failing rows are listed first.

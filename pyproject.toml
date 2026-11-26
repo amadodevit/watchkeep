@@ -22,6 +22,7 @@ website = "watchkeep.plugins.website:WebsiteSource"
 activemq = "watchkeep.plugins.activemq:ActiveMQSource"
 feeds = "watchkeep.plugins.feeds:FeedsSource"
 calendar = "watchkeep.plugins.calendar:CalendarSource"
+command = "watchkeep.plugins.command:CommandSource"
 
 [project.optional-dependencies]
 feeds = [
